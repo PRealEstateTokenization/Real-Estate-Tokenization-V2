@@ -42,12 +42,6 @@ async function main() {
     console.log("KYC: local demo users (Bob, Carol) approved");
   }
 
-  const docHash = hre.ethers.keccak256(hre.ethers.toUtf8Bytes("Sunworth City tower - title deed"));
-  await (await factory.registerLand(
-    "Plot 42, Whitefield", "PLOT42", 1000n, docHash, "demo"
-  )).wait();
-  console.log("Seeded a sample property owned by the deployer (1000 shares)");
-
   const artifactsDir = "./frontend-config";
   if (!fs.existsSync(artifactsDir)) fs.mkdirSync(artifactsDir);
 
