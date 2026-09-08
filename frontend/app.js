@@ -1,26 +1,24 @@
 /* ============================================================
    Parcel — app.js
-   Multi-page (hash-routed) real estate tokenisation demo.
-   Contracts are unchanged/already verified: Whitelist,
-   PropertyToken (+yield), PropertyTokenFactory, Marketplace.
-   No wallet, no cryptocurrency — login maps to a local signer;
-   money and rent are rupee figures the chain only records.
+   Real self-custody build: users connect their own MetaMask
+   wallet on Sepolia and sign their own transactions. Known team
+   wallets are shown by name; any other wallet shows its address.
+   Ownership is recorded on-chain; payment/rent are rupees off-chain.
    ============================================================ */
 
-let CONFIG = null, ABIS = null, provider = null;
-let session = null; // { idx, name, email, address, signer }
+let CONFIG = null, ABIS = null, provider = null;      // provider = read-only (Sepolia RPC)
+let session = null;                                    // { name, role, address, signer }
 
-/* ---- Demo accounts: real login form, backed by Hardhat's
-   deterministic pre-funded/pre-KYC'd accounts (seeded by deploy.js).
-   These are demo-only keys, never used for anything real. ---- */
-const ACCOUNTS = [
-  { name:'Alice Menon',  role:'Property Owner', email:'alice@parcel.demo', password:'demo1234',
-    pk:'0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80' },
-  { name:'Bob Iyer',     role:'Investor',       email:'bob@parcel.demo',   password:'demo1234',
-    pk:'0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d' },
-  { name:'Carol Reddy',  role:'Investor',       email:'carol@parcel.demo', password:'demo1234',
-    pk:'0x5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a' },
-];
+/* ---- Known team wallets -> friendly name/role.
+   Lowercase the address keys. Any wallet not listed here still works;
+   it just shows as its shortened address. FILL IN when addresses arrive. ---- */
+const NAMES = {
+  "0x38331533814a12e238d8d7329d56fdeb9b46a6a4": { name:"Arya",    role:"Property Owner" },
+  "0x4df0b8779cd4ea20f1bd27e114b7cd4bf756b0c3": { name:"Ronan",   role:"Investor" },
+  // "0xRISHABH_ADDRESS_LOWERCASE": { name:"Rishabh", role:"Investor" },
+};
+
+const SEPOLIA_CHAIN_ID = "0xaa36a7"; // 11155111 in hex
 
 /* ---------------- boot ---------------- */
 async function boot(){
@@ -30,14 +28,21 @@ async function boot(){
       fetch('./abis.json').then(r=>r.json()),
     ]);
     CONFIG = addr; ABIS = abis;
-    provider = new ethers.JsonRpcProvider(CONFIG.rpc || 'http://127.0.0.1:8545');
+    // read-only provider for viewing the chain without a wallet connected
+    provider = new ethers.JsonRpcProvider(CONFIG.rpc);
   }catch(e){
     document.getElementById('app').innerHTML =
       '<div class="page container"><div class="status show err">Could not load contract config. '+
-      'Make sure you copied addresses.json and abis.json into frontend/, and the local chain is running. '+
-      'See SETUP_GUIDE.md.</div></div>';
+      'Make sure addresses.json and abis.json are in frontend/.</div></div>';
     return;
   }
+
+  // react to the user switching accounts or networks in MetaMask
+  if(window.ethereum){
+    window.ethereum.on('accountsChanged', ()=>{ session=null; connectWallet(true); });
+    window.ethereum.on('chainChanged', ()=>window.location.reload());
+  }
+
   window.addEventListener('hashchange', render);
   render();
 }
@@ -46,30 +51,70 @@ async function boot(){
 const CONFIG_KEY = { Whitelist:'whitelist', PropertyTokenFactory:'factory', Marketplace:'marketplace' };
 function contract(name, addrOverride){
   const addr = addrOverride || CONFIG[CONFIG_KEY[name]];
-  if(!addr) throw new Error('No address configured for '+name+'. Check frontend/addresses.json.');
+  if(!addr) throw new Error('No address configured for '+name+'.');
+  // writes use the connected wallet's signer; reads can use the plain provider
   const signerOrProvider = session ? session.signer : provider;
   return new ethers.Contract(addr, ABIS[name], signerOrProvider);
 }
 function short(a){ return a.slice(0,6)+'\u2026'+a.slice(-4); }
-function initials(name){ return name.split(' ').map(w=>w[0]).join('').toUpperCase(); }
+function initials(name){ return name.split(' ').map(w=>w[0]).join('').toUpperCase().slice(0,2); }
 function rupee(n){ return '\u20B9'+Number(n).toLocaleString('en-IN'); }
-
-/* ---------------- auth ---------------- */
-function login(email, password){
-  const acc = ACCOUNTS.find(a => a.email.toLowerCase()===email.toLowerCase().trim() && a.password===password);
-  if(!acc) return { ok:false, error:'Incorrect email or password.' };
-  const signer = new ethers.Wallet(acc.pk, provider);
-  session = { name:acc.name, role:acc.role, email:acc.email, address: signer.address, signer };
-  location.hash = '#/dashboard';
-  return { ok:true };
+function nameFor(addr){
+  const known = NAMES[addr.toLowerCase()];
+  return known ? known.name : short(addr);
 }
-function logout(){ session = null; location.hash = '#/'; }
-function requireLogin(){ if(!session){ location.hash = '#/login'; return false; } return true; }
+function roleFor(addr){
+  const known = NAMES[addr.toLowerCase()];
+  return known ? known.role : 'Investor';
+}
+
+/* ---------------- wallet connect (replaces login) ---------------- */
+async function connectWallet(silent){
+  if(!window.ethereum){
+    if(!silent) alert('MetaMask not found. Please install the MetaMask browser extension, then reload.');
+    return { ok:false, error:'no-metamask' };
+  }
+  try{
+    const accounts = await window.ethereum.request({ method:'eth_requestAccounts' });
+    if(!accounts || !accounts.length) return { ok:false, error:'no-account' };
+
+    const chainId = await window.ethereum.request({ method:'eth_chainId' });
+    if(chainId !== SEPOLIA_CHAIN_ID){
+      try{
+        await window.ethereum.request({
+          method:'wallet_switchEthereumChain',
+          params:[{ chainId: SEPOLIA_CHAIN_ID }],
+        });
+      }catch(switchErr){
+        if(!silent) alert('Please switch MetaMask to the Sepolia test network, then connect again.');
+        return { ok:false, error:'wrong-network' };
+      }
+    }
+
+    const browserProvider = new ethers.BrowserProvider(window.ethereum);
+    const signer = await browserProvider.getSigner();
+    const address = await signer.getAddress();
+
+    session = { name:nameFor(address), role:roleFor(address), address, signer };
+    render();
+    return { ok:true };
+  }catch(e){
+    if(!silent){
+      const msg = (e && e.code === 4001) ? 'Connection request was rejected.' : (e.message || 'Could not connect.');
+      alert(msg);
+    }
+    return { ok:false, error:e };
+  }
+}
+function logout(){ session = null; location.hash = '#/'; render(); }
+function requireLogin(){
+  if(!session){ connectWallet(false); return false; }
+  return true;
+}
 
 /* ---------------- router ---------------- */
 const routes = {
   '': renderHome, '/': renderHome,
-  '/login': renderLogin,
   '/properties': renderProperties,
   '/dashboard': renderDashboard,
   '/list-property': renderListProperty,
@@ -102,9 +147,9 @@ function renderNav(){
       </div>
       <div class="nav-right">
         ${session
-          ? `<div class="user-chip"><span class="avatar">${initials(session.name)}</span>${session.name.split(' ')[0]}
-              <button class="btn-logout" onclick="logout()">Log out</button></div>`
-          : `<button class="btn-login-nav" onclick="location.hash='#/login'">Log in</button>`}
+          ? `<div class="user-chip"><span class="avatar">${initials(session.name)}</span>${session.name}
+              <button class="btn-logout" onclick="logout()">Disconnect</button></div>`
+          : `<button class="btn-login-nav" onclick="connectWallet(false)">Connect Wallet</button>`}
       </div>
     </div>`;
 }
@@ -121,7 +166,7 @@ function renderHome(){
            are handled in rupees, off-chain.</p>
         <div class="hero-actions">
           <button class="btn gold" onclick="location.hash='#/properties'">Browse Properties</button>
-          <button class="btn ghost" onclick="location.hash='#/login'">Log In</button>
+          <button class="btn ghost" onclick="connectWallet(false)">Connect Wallet</button>
         </div>
       </div>
     </section>
@@ -140,76 +185,6 @@ function renderHome(){
       <div id="homeProps" class="grid-3"><div class="loading">Loading properties\u2026</div></div>
     </div>`;
   loadPropertyCards('homeProps', 3);
-}
-
-/* ================= LOGIN / SIGNUP ================= */
-function renderLogin(){
-  document.getElementById('app').innerHTML = `
-    <div class="page">
-      <div class="auth-wrap">
-        <div class="card">
-          <div class="auth-tabs">
-            <div class="auth-tab active" id="tabLogin" onclick="switchAuthTab('login')">Log In</div>
-            <div class="auth-tab" id="tabSignup" onclick="switchAuthTab('signup')">Sign Up</div>
-          </div>
-
-          <div id="loginPane">
-            <h2 style="font-size:19px;margin-bottom:4px">Welcome back</h2>
-            <p style="font-size:13px;color:var(--muted);margin-bottom:4px">Log in to manage your properties and holdings.</p>
-            <label>Email</label><input id="loginEmail" placeholder="you@parcel.demo" />
-            <label>Password</label><input id="loginPassword" type="password" placeholder="\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022" />
-            <button class="btn block" style="margin-top:18px" onclick="handleLogin()">Log In</button>
-            <div id="loginStatus" class="status"></div>
-
-            <div class="demo-accounts">
-              <p>Demo accounts &mdash; click to log in instantly</p>
-              ${ACCOUNTS.map(a=>`
-                <div class="demo-chip" onclick="quickLogin('${a.email}')">
-                  <div><div class="who">${a.name}</div><div class="cred">${a.email} &middot; ${a.password}</div></div>
-                  <span class="role">${a.role}</span>
-                </div>`).join('')}
-            </div>
-          </div>
-
-          <div id="signupPane" style="display:none">
-            <h2 style="font-size:19px;margin-bottom:4px">Create an account</h2>
-            <p style="font-size:13px;color:var(--muted);margin-bottom:4px">Join the platform as a new investor.</p>
-            <label>Full name</label><input id="suName" placeholder="Your name" />
-            <label>Email</label><input id="suEmail" placeholder="you@example.com" />
-            <label>Password</label><input id="suPassword" type="password" placeholder="Choose a password" />
-            <button class="btn block" style="margin-top:18px" onclick="handleSignup()">Create Account</button>
-            <div id="signupStatus" class="status"></div>
-          </div>
-        </div>
-      </div>
-    </div>`;
-}
-function switchAuthTab(which){
-  document.getElementById('tabLogin').classList.toggle('active', which==='login');
-  document.getElementById('tabSignup').classList.toggle('active', which==='signup');
-  document.getElementById('loginPane').style.display = which==='login' ? '' : 'none';
-  document.getElementById('signupPane').style.display = which==='signup' ? '' : 'none';
-}
-function quickLogin(email){
-  const acc = ACCOUNTS.find(a=>a.email===email);
-  document.getElementById('loginEmail').value = acc.email;
-  document.getElementById('loginPassword').value = acc.password;
-  handleLogin();
-}
-function handleLogin(){
-  const email = document.getElementById('loginEmail').value;
-  const password = document.getElementById('loginPassword').value;
-  const r = login(email, password);
-  if(!r.ok){
-    const el = document.getElementById('loginStatus');
-    el.textContent = r.error; el.className = 'status show err';
-  }
-}
-function handleSignup(){
-  const el = document.getElementById('signupStatus');
-  el.textContent = 'New sign-ups are queued for identity verification before they can trade. '+
-    'For today\u2019s demo, please use one of the verified demo accounts on the Log In tab.';
-  el.className = 'status show info';
 }
 
 /* ================= PROPERTIES (browse) ================= */
@@ -269,7 +244,6 @@ async function renderPropertyDetail(tokenAddr){
     const myPending = me ? await tk.pendingYield(me) : 0n;
     const isOwner = me && me.toLowerCase()===registrant.toLowerCase();
 
-    // listings for this token
     const market = contract('Marketplace');
     const n = Number(await market.nextListingId());
     let listingRows = '', myListingIdx = [];
@@ -285,13 +259,11 @@ async function renderPropertyDetail(tokenAddr){
         <td class="rupee">${rupee(l[3])}</td>
         <td>${l[4]?'<span class="pill active">active</span>':'<span class="pill closed">closed</span>'}</td>
         <td>${(l[4]&&isSeller)?`
-          <select id="buyer${i}" style="width:120px;display:inline-block;padding:6px 8px;font-size:12px;margin-right:4px">
-            ${ACCOUNTS.filter(a=>a.email!==session.email).map(a=>`<option value="${new ethers.Wallet(a.pk).address}">${a.name}</option>`).join('')}
-          </select>
-          <input id="qty${i}" type="number" placeholder="qty" style="width:60px;display:inline-block;padding:6px 8px;font-size:12px;margin-right:4px">
+          <input id="buyer${i}" placeholder="buyer 0x..." style="width:150px;display:inline-block;padding:6px 8px;font-size:11px;margin-right:4px;font-family:monospace">
+          <input id="qty${i}" type="number" placeholder="qty" style="width:56px;display:inline-block;padding:6px 8px;font-size:12px;margin-right:4px">
           <button class="btn small gold" onclick="handleSettle(${i})">Settle</button>`
           : (l[4] && me) ? `<button class="btn small outline" onclick="openBuy(${i}, '${l[2].toString()}', '${l[3].toString()}', '${l[0]}')">Buy</button>`
-          : (l[4] && !me) ? `<a href="#/login" style="font-size:12px;color:var(--blue);font-weight:600">Log in to buy</a>`
+          : (l[4] && !me) ? `<button class="btn small outline" onclick="connectWallet(false)">Connect to buy</button>`
           : '\u2014'}</td>
       </tr>`;
     }
@@ -303,12 +275,13 @@ async function renderPropertyDetail(tokenAddr){
           <span class="kicker">${symbol}</span>
           <h1>${name}</h1>
           <p>${supply.toString()} total shares &middot; registered by ${short(registrant)}${isOwner?' (you)':''} &middot; document hash <span class="badge">${docHash.slice(0,14)}\u2026</span></p>
+          <button class="btn outline small" style="margin-top:14px" onclick="downloadHistory('${tokenAddr}', '${name.replace(/'/g,"")}', '${symbol}')">&darr; Download Ownership History (CSV)</button>
         </div>
 
         <div class="grid-2">
           <div class="card">
             <div class="section-title">Your Position</div>
-            <div class="section-sub">${session?'':'Log in to see your holdings for this property.'}</div>
+            <div class="section-sub">${session?'':'Connect your wallet to see your holdings for this property.'}</div>
             ${session?`
               <div class="grid-2" style="gap:14px">
                 <div class="stat-card"><div class="label">Shares Held</div><div class="value">${myBalance.toString()}</div></div>
@@ -316,7 +289,7 @@ async function renderPropertyDetail(tokenAddr){
               </div>
               ${myPending>0n?`<button class="btn gold block" style="margin-top:14px" onclick="handleClaim('${tokenAddr}')">Claim Rent</button>`:''}
               <div id="claimStatus" class="status"></div>
-            `:`<button class="btn outline block" onclick="location.hash='#/login'">Log In</button>`}
+            `:`<button class="btn outline block" onclick="connectWallet(false)">Connect Wallet</button>`}
           </div>
 
           <div class="card">
@@ -384,15 +357,12 @@ async function handleSettle(id){
   }catch(e){ alert(prettyErr(e)); }
 }
 
-/* Buyer-side flow. The contract only allows the SELLER to call
-   settlePurchase (that's how "no on-chain payment" stays enforced —
-   someone has to authorise release after off-chain payment clears).
-   Since this demo already holds every demo user's key client-side
-   (that's how login-switching works with no wallet), we use the
-   seller's key to sign the settlement automatically the moment the
-   buyer confirms — so "Buy" completes for real, in one click, while
-   the actual rule (only the seller's signature moves the shares)
-   stays exactly as the contract enforces it. */
+/* Buyer-side flow (real self-custody).
+   Payment is off-chain in rupees, and only the SELLER can release
+   shares (the contract enforces this). So a buyer cannot complete a
+   purchase by themselves. This panel gives the buyer exactly what they
+   need to hand the seller: the amount to pay and their own wallet
+   address. The seller then settles from their own wallet. */
 function openBuy(listingId, remainingStr, priceStr, sellerAddr){
   const remaining = BigInt(remainingStr), price = BigInt(priceStr);
   const defaultQty = remaining < 10n ? remaining : 10n;
@@ -404,41 +374,27 @@ function openBuy(listingId, remainingStr, priceStr, sellerAddr){
       <label>Quantity (max ${remaining.toString()})</label>
       <input id="buyQty" type="number" min="1" max="${remaining.toString()}" value="${defaultQty.toString()}"
              oninput="updateBuyTotal('${priceStr}')" />
-      <div class="field-note" id="buyTotal">Total: ${rupee(defaultQty*price)}</div>
-      <div class="field-note">In production you'd pay the seller this amount in rupees off-chain, and they'd
-        confirm receipt before releasing the shares. This demo confirms that step instantly so you can see
-        the full flow &mdash; the shares are still only released by the seller's own authorisation.</div>
-      <button class="btn gold block" style="margin-top:14px" id="confirmBuyBtn"
-              onclick="confirmBuy(${listingId}, '${priceStr}', '${sellerAddr}')">Confirm Purchase</button>
-      <button class="btn ghost small" style="margin-top:8px" onclick="document.getElementById('buyPanelWrap').innerHTML=''">Cancel</button>
-      <div id="buyStatus" class="status"></div>
+      <div class="field-note" id="buyTotal">Amount to pay the seller: ${rupee(defaultQty*price)}</div>
+
+      <div style="margin-top:16px;padding:14px;background:var(--cream2);border-radius:10px">
+        <div style="font-weight:600;margin-bottom:8px">To complete this purchase:</div>
+        <div class="field-note" style="margin-top:0">1. Pay the seller the amount above in rupees (UPI / bank transfer, off-chain).</div>
+        <div class="field-note">2. Send the seller <b>your wallet address</b> (below) and the quantity.</div>
+        <div class="field-note">3. The seller confirms payment and releases the shares to you from their wallet.</div>
+        <label style="margin-top:12px">Your wallet address &mdash; give this to the seller</label>
+        <input readonly value="${session ? session.address : 'connect your wallet first'}" onclick="this.select()"
+               style="font-family:monospace;font-size:12px" />
+        <div><b>Seller:</b> <span style="font-family:monospace;font-size:12px">${short(sellerAddr)}</span></div>
+      </div>
+
+      <button class="btn ghost small" style="margin-top:12px" onclick="document.getElementById('buyPanelWrap').innerHTML=''">Close</button>
     </div>`;
   wrap.scrollIntoView({behavior:'smooth', block:'center'});
 }
 function updateBuyTotal(priceStr){
   const price = BigInt(priceStr);
   const qty = BigInt(document.getElementById('buyQty').value || '0');
-  document.getElementById('buyTotal').textContent = 'Total: ' + rupee(qty*price);
-}
-async function confirmBuy(listingId, priceStr, sellerAddr){
-  try{
-    const qty = BigInt(document.getElementById('buyQty').value || '0');
-    if(qty<=0n){ setSt('buyStatus','Enter a quantity.','err'); return; }
-    document.getElementById('confirmBuyBtn').disabled = true;
-    setSt('buyStatus','Confirming payment and settling on-chain\u2026','info');
-
-    const sellerAccount = ACCOUNTS.find(a => new ethers.Wallet(a.pk).address.toLowerCase() === sellerAddr.toLowerCase());
-    if(!sellerAccount) throw new Error('Could not find the seller\u2019s signing key for this demo listing.');
-    const sellerSigner = new ethers.Wallet(sellerAccount.pk, provider);
-    const marketAsSeller = new ethers.Contract(CONFIG.marketplace, ABIS.Marketplace, sellerSigner);
-
-    await (await marketAsSeller.settlePurchase(listingId, session.address, qty)).wait();
-    setSt('buyStatus', 'Purchase complete \u2014 '+qty+' shares transferred to you.', 'ok');
-    setTimeout(()=>render(), 1000);
-  }catch(e){
-    document.getElementById('confirmBuyBtn').disabled = false;
-    setSt('buyStatus', prettyErr(e), 'err');
-  }
+  document.getElementById('buyTotal').textContent = 'Amount to pay the seller: ' + rupee(qty*price);
 }
 async function handleDeposit(tokenAddr){
   try{
@@ -448,6 +404,55 @@ async function handleDeposit(tokenAddr){
     setSt('yieldStatus','Distributed '+rupee(amt)+' pro-rata across all shareholders.','ok');
     setTimeout(()=>renderPropertyDetail(tokenAddr), 700);
   }catch(e){ setSt('yieldStatus', prettyErr(e), 'err'); }
+}
+/* Download the full on-chain ownership history for a property as CSV.
+   Reads every Transfer event directly from Sepolia via the read-only
+   provider — works whether or not a wallet is connected. Each row is a
+   permanent, publicly verifiable ownership change. */
+async function downloadHistory(tokenAddr, name, symbol){
+  try{
+    const tk = new ethers.Contract(tokenAddr, ABIS.PropertyToken, provider);
+    const events = await tk.queryFilter(tk.filters.Transfer(), 0, 'latest');
+    const ZERO = '0x0000000000000000000000000000000000000000';
+
+    const csvCell = s => { s = String(s); return /[",\n]/.test(s) ? '"'+s.replace(/"/g,'""')+'"' : s; };
+    const header = ['#','Type','From','To','Shares','Block','Transaction Hash'];
+    const rows = events.map((e,i)=>{
+      const isMint = e.args.from === ZERO;
+      return [
+        i+1,
+        isMint ? 'Mint (initial issue)' : 'Transfer',
+        isMint ? '(newly minted)' : e.args.from,
+        e.args.to,
+        e.args.value.toString(),
+        e.blockNumber,
+        e.transactionHash,
+      ];
+    });
+
+    const meta = [
+      ['Property', name],
+      ['Token Symbol', symbol],
+      ['Token Contract', tokenAddr],
+      ['Network', CONFIG.network || 'sepolia'],
+      ['Exported', new Date().toLocaleString()],
+      ['Total Records', rows.length],
+      [],
+    ];
+    const csv = [...meta, header, ...rows].map(r => r.map(csvCell).join(',')).join('\n');
+
+    const blob = new Blob([csv], { type:'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${symbol||'property'}_ownership_history.csv`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }catch(e){
+    alert('Could not export history: ' + (e.message || e));
+  }
 }
 async function handleClaim(tokenAddr){
   try{
@@ -469,8 +474,8 @@ function renderListProperty(){
         <p>Tokenise a parcel into shares. You (as the registrant) receive 100% of the shares to start.</p>
       </div>
       <div class="card">
-        <label>Property name</label><input id="pName" value="Puravankara, Tower B" />
-        <label>Symbol</label><input id="pSymbol" value="PRVK-B" />
+        <label>Property name</label><input id="pName" value="Puravankara, Tower A" />
+        <label>Symbol</label><input id="pSymbol" value="PRVK-A" />
         <label>Total shares</label><input id="pShares" type="number" value="1000" />
         <div class="field-note">Whole-number shares. Owning 50 of 1000 = 5% of the property.</div>
         <label>Document reference</label><input id="pDoc" value="Title deed and khata extract" />
@@ -544,7 +549,7 @@ async function renderDashboard(){
       <div class="page container">
         <div class="page-head">
           <span class="kicker">Dashboard</span>
-          <h1>Welcome back, ${session.name.split(' ')[0]}</h1>
+          <h1>Welcome back, ${session.name}</h1>
           <p>${session.role} &middot; ${short(session.address)}</p>
         </div>
 
@@ -585,7 +590,7 @@ function prettyErr(e){
   if(m.includes('Only property owner')) return 'Only the property owner can distribute rent.';
   if(m.includes('Only seller')) return 'Only the seller can settle their own listing.';
   if(m.includes('Nothing to claim')) return 'Nothing to claim yet.';
-  if(m.includes('could not detect network')||m.includes('failed to detect')) return 'Cannot reach the local blockchain. Is the Hardhat node running?';
+  if(m.includes('could not detect network')||m.includes('failed to detect')) return 'Cannot reach the network. Check your connection and that MetaMask is on Sepolia.';
   return m.length>140 ? m.slice(0,140)+'\u2026' : m;
 }
 
