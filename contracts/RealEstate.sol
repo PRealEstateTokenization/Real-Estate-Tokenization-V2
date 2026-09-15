@@ -236,6 +236,24 @@ contract Marketplace {
         emit Settled(id, buyer, amount, l.amount);
     }
 
+    /// Real-time buy: any KYC-approved wallet pulls escrowed shares directly.
+    /// No on-chain payment — rupee payment is off-chain and assumed complete
+    /// for the demo. The seller already permitted the sale by listing (escrow),
+    /// so no seller signature is needed here — this is what makes it real-time.
+    function buy(uint256 id, uint256 amount) external {
+        Listing storage l = listings[id];
+        require(l.active, "Listing not active");
+        require(whitelist.isApproved(msg.sender), "Buyer not KYC-approved");
+        require(amount > 0 && amount <= l.amount, "Invalid amount");
+        require(msg.sender != l.seller, "Seller cannot buy own listing");
+
+        l.amount -= amount;
+        if (l.amount == 0) l.active = false;
+
+        require(PropertyToken(l.token).transfer(msg.sender, amount), "Transfer failed");
+        emit Settled(id, msg.sender, amount, l.amount);
+    }
+
     function cancel(uint256 id) external {
         Listing storage l = listings[id];
         require(l.seller == msg.sender, "Not seller");

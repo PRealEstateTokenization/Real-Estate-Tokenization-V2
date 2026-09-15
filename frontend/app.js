@@ -246,25 +246,23 @@ async function renderPropertyDetail(tokenAddr){
 
     const market = contract('Marketplace');
     const n = Number(await market.nextListingId());
-    let listingRows = '', myListingIdx = [];
+    let listingRows = '';
     for(let i=0;i<n;i++){
       const l = await market.listings(i);
       if(l[1].toLowerCase() !== tokenAddr.toLowerCase()) continue;
       if(!l[4] && l[2]===0n) continue;
       const isSeller = me && l[0].toLowerCase()===me.toLowerCase();
-      if(isSeller && l[4]) myListingIdx.push(i);
       listingRows += `<tr>
         <td>${short(l[0])}${isSeller?' <span class="tag-onchain">you</span>':''}</td>
         <td>${l[2].toString()}</td>
         <td class="rupee">${rupee(l[3])}</td>
         <td>${l[4]?'<span class="pill active">active</span>':'<span class="pill closed">closed</span>'}</td>
-        <td>${(l[4]&&isSeller)?`
-          <input id="buyer${i}" placeholder="buyer 0x..." style="width:150px;display:inline-block;padding:6px 8px;font-size:11px;margin-right:4px;font-family:monospace">
-          <input id="qty${i}" type="number" placeholder="qty" style="width:56px;display:inline-block;padding:6px 8px;font-size:12px;margin-right:4px">
-          <button class="btn small gold" onclick="handleSettle(${i})">Settle</button>`
-          : (l[4] && me) ? `<button class="btn small outline" onclick="openBuy(${i}, '${l[2].toString()}', '${l[3].toString()}', '${l[0]}')">Buy</button>`
-          : (l[4] && !me) ? `<button class="btn small outline" onclick="connectWallet(false)">Connect to buy</button>`
-          : '\u2014'}</td>
+        <td>${
+          !l[4] ? '\u2014'
+          : !me ? `<button class="btn small outline" onclick="connectWallet(false)">Connect to buy</button>`
+          : isSeller ? `<button class="btn small ghost" onclick="handleCancel(${i}, '${tokenAddr}')">Cancel listing</button>`
+          : `<button class="btn small gold" onclick="openBuy(${i}, '${l[2].toString()}', '${l[3].toString()}', '${tokenAddr}')">Buy</button>`
+        }</td>
       </tr>`;
     }
 
@@ -319,7 +317,7 @@ async function renderPropertyDetail(tokenAddr){
 
         <div class="card">
           <div class="section-title">Marketplace Listings</div>
-          <div class="section-sub">All active and past listings for this property. Buyers see how to pay and request settlement; the seller settles once rupee payment is confirmed off-chain &mdash; no money moves on-chain.</div>
+          <div class="section-sub">Shares listed for sale. Buying is instant &mdash; the seller escrowed the shares when listing, so a buyer completes the purchase in one click from their own wallet. Payment is settled in rupees, off-chain.</div>
           <table>
             <thead><tr><th>Seller</th><th>Shares</th><th>Price/Share</th><th>Status</th><th>Action</th></tr></thead>
             <tbody>${listingRows || '<tr><td colspan=5 class="empty">No listings for this property yet.</td></tr>'}</tbody>
@@ -339,84 +337,111 @@ async function handleList(tokenAddr){
     const amount = BigInt(document.getElementById('listAmt').value);
     const price = BigInt(document.getElementById('listPrice').value);
     const tk = contract('PropertyToken', tokenAddr);
-    setSt('listStatus','Step 1/2 \u2014 approving escrow\u2026','info');
+    setSt('listStatus','Step 1/2 \u2014 approving escrow (confirm in MetaMask)\u2026','info');
     await (await tk.approve(CONFIG.marketplace, amount)).wait();
-    setSt('listStatus','Step 2/2 \u2014 creating listing\u2026','info');
+    setSt('listStatus','Step 2/2 \u2014 creating listing (confirm in MetaMask)\u2026','info');
     await (await contract('Marketplace').list(tokenAddr, amount, price)).wait();
     setSt('listStatus','Listed '+amount+' shares at '+rupee(price)+' each.','ok');
-    setTimeout(()=>renderPropertyDetail(tokenAddr), 700);
+    setTimeout(()=>renderPropertyDetail(tokenAddr), 900);
   }catch(e){ setSt('listStatus', prettyErr(e), 'err'); }
 }
-async function handleSettle(id){
+
+async function handleCancel(id, tokenAddr){
   try{
-    const buyer = document.getElementById('buyer'+id).value;
-    const qty = BigInt(document.getElementById('qty'+id).value || '0');
-    if(qty<=0n){ alert('Enter a quantity.'); return; }
-    await (await contract('Marketplace').settlePurchase(id, buyer, qty)).wait();
-    render();
+    await (await contract('Marketplace').cancel(id)).wait();
+    renderPropertyDetail(tokenAddr);
   }catch(e){ alert(prettyErr(e)); }
 }
 
-/* Buyer-side flow (real self-custody).
-   Payment is off-chain in rupees, and only the SELLER can release
-   shares (the contract enforces this). So a buyer cannot complete a
-   purchase by themselves. This panel gives the buyer exactly what they
-   need to hand the seller: the amount to pay and their own wallet
-   address. The seller then settles from their own wallet. */
-function openBuy(listingId, remainingStr, priceStr, sellerAddr){
+/* Real-time buy. The seller already escrowed the shares by listing, and
+   permitted the sale then. So a buyer completes the purchase in one click
+   from their own wallet — no seller involvement, instant. Rupee payment is
+   off-chain and assumed complete for the demo. */
+function openBuy(listingId, remainingStr, priceStr, tokenAddr){
   const remaining = BigInt(remainingStr), price = BigInt(priceStr);
   const defaultQty = remaining < 10n ? remaining : 10n;
   const wrap = document.getElementById('buyPanelWrap');
   wrap.innerHTML = `
-    <div class="card" style="border:1.5px solid var(--gold)">
+    <div class="card" style="border:1.5px solid var(--clay)">
       <div class="section-title">Buy Shares &mdash; Listing #${listingId}</div>
       <div class="section-sub">${remaining.toString()} shares available at ${rupee(price)} each.</div>
       <label>Quantity (max ${remaining.toString()})</label>
       <input id="buyQty" type="number" min="1" max="${remaining.toString()}" value="${defaultQty.toString()}"
              oninput="updateBuyTotal('${priceStr}')" />
-      <div class="field-note" id="buyTotal">Amount to pay the seller: ${rupee(defaultQty*price)}</div>
-
-      <div style="margin-top:16px;padding:14px;background:var(--cream2);border-radius:10px">
-        <div style="font-weight:600;margin-bottom:8px">To complete this purchase:</div>
-        <div class="field-note" style="margin-top:0">1. Pay the seller the amount above in rupees (UPI / bank transfer, off-chain).</div>
-        <div class="field-note">2. Send the seller <b>your wallet address</b> (below) and the quantity.</div>
-        <div class="field-note">3. The seller confirms payment and releases the shares to you from their wallet.</div>
-        <label style="margin-top:12px">Your wallet address &mdash; give this to the seller</label>
-        <input readonly value="${session ? session.address : 'connect your wallet first'}" onclick="this.select()"
-               style="font-family:monospace;font-size:12px" />
-        <div><b>Seller:</b> <span style="font-family:monospace;font-size:12px">${short(sellerAddr)}</span></div>
-      </div>
-
-      <button class="btn ghost small" style="margin-top:12px" onclick="document.getElementById('buyPanelWrap').innerHTML=''">Close</button>
+      <div class="field-note" id="buyTotal">Total: ${rupee(defaultQty*price)}  (settled in rupees, off-chain)</div>
+      <button class="btn gold block" style="margin-top:16px" id="confirmBuyBtn"
+              onclick="confirmBuy(${listingId}, '${tokenAddr}')">Confirm Purchase</button>
+      <button class="btn ghost small" style="margin-top:8px" onclick="document.getElementById('buyPanelWrap').innerHTML=''">Cancel</button>
+      <div id="buyStatus" class="status"></div>
     </div>`;
   wrap.scrollIntoView({behavior:'smooth', block:'center'});
 }
 function updateBuyTotal(priceStr){
   const price = BigInt(priceStr);
   const qty = BigInt(document.getElementById('buyQty').value || '0');
-  document.getElementById('buyTotal').textContent = 'Amount to pay the seller: ' + rupee(qty*price);
+  document.getElementById('buyTotal').textContent = 'Total: ' + rupee(qty*price) + '  (settled in rupees, off-chain)';
 }
+async function confirmBuy(listingId, tokenAddr){
+  if(!requireLogin()) return;
+  try{
+    const qty = BigInt(document.getElementById('buyQty').value || '0');
+    if(qty<=0n){ setSt('buyStatus','Enter a quantity.','err'); return; }
+    const btn = document.getElementById('confirmBuyBtn'); if(btn) btn.disabled = true;
+    setSt('buyStatus','Confirm in MetaMask\u2026','info');
+    await (await contract('Marketplace').buy(listingId, qty)).wait();
+    setSt('buyStatus','Purchase complete \u2014 '+qty+' shares are now yours.','ok');
+    setTimeout(()=>renderPropertyDetail(tokenAddr), 1200);
+  }catch(e){
+    const btn = document.getElementById('confirmBuyBtn'); if(btn) btn.disabled = false;
+    setSt('buyStatus', prettyErr(e), 'err');
+  }
+}
+
 async function handleDeposit(tokenAddr){
   try{
     const amt = BigInt(document.getElementById('yieldAmt').value);
-    setSt('yieldStatus','Distributing\u2026','info');
+    setSt('yieldStatus','Distributing (confirm in MetaMask)\u2026','info');
     await (await contract('PropertyToken', tokenAddr).depositYield(amt)).wait();
     setSt('yieldStatus','Distributed '+rupee(amt)+' pro-rata across all shareholders.','ok');
-    setTimeout(()=>renderPropertyDetail(tokenAddr), 700);
+    setTimeout(()=>renderPropertyDetail(tokenAddr), 900);
   }catch(e){ setSt('yieldStatus', prettyErr(e), 'err'); }
 }
+
 /* Download the full on-chain ownership history for a property as CSV.
-   Reads every Transfer event directly from Sepolia via the read-only
-   provider — works whether or not a wallet is connected. Each row is a
-   permanent, publicly verifiable ownership change. */
+   Alchemy's free tier limits eth_getLogs to a 10-block range per call,
+   so we scan in 10-block chunks, starting near the token's creation
+   (found from the Factory's LandRegistered event) rather than block 0. */
 async function downloadHistory(tokenAddr, name, symbol){
   try{
-    const tk = new ethers.Contract(tokenAddr, ABIS.PropertyToken, provider);
-    const events = await tk.queryFilter(tk.filters.Transfer(), 0, 'latest');
-    const ZERO = '0x0000000000000000000000000000000000000000';
+    const CHUNK = 10; // free-tier eth_getLogs block-range cap
+    const latest = await provider.getBlockNumber();
 
+    // find the token's creation block via the Factory event (bounded scan)
+    const factory = new ethers.Contract(CONFIG.factory, ABIS.PropertyTokenFactory, provider);
+    let startBlock = Math.max(0, latest - 4900); // safety floor
+    try{
+      const filter = factory.filters.LandRegistered(null, tokenAddr);
+      for(let to = latest; to >= 0; to -= CHUNK){
+        const from = Math.max(0, to - CHUNK + 1);
+        const found = await factory.queryFilter(filter, from, to);
+        if(found.length){ startBlock = found[0].blockNumber; break; }
+        if(from === 0) break;
+      }
+    }catch{ /* keep safety-floor startBlock */ }
+
+    // scan Transfer events 10 blocks at a time
+    const tk = new ethers.Contract(tokenAddr, ABIS.PropertyToken, provider);
+    const transferFilter = tk.filters.Transfer();
+    let events = [];
+    for(let from = startBlock; from <= latest; from += CHUNK){
+      const to = Math.min(from + CHUNK - 1, latest);
+      const batch = await tk.queryFilter(transferFilter, from, to);
+      events = events.concat(batch);
+    }
+
+    const ZERO = '0x0000000000000000000000000000000000000000';
     const csvCell = s => { s = String(s); return /[",\n]/.test(s) ? '"'+s.replace(/"/g,'""')+'"' : s; };
-    const header = ['#','Type','From','To','Shares','Block','Transaction Hash'];
+    const headerRow = ['#','Type','From','To','Shares','Block','Transaction Hash'];
     const rows = events.map((e,i)=>{
       const isMint = e.args.from === ZERO;
       return [
@@ -439,7 +464,7 @@ async function downloadHistory(tokenAddr, name, symbol){
       ['Total Records', rows.length],
       [],
     ];
-    const csv = [...meta, header, ...rows].map(r => r.map(csvCell).join(',')).join('\n');
+    const csv = [...meta, headerRow, ...rows].map(r => r.map(csvCell).join(',')).join('\n');
 
     const blob = new Blob([csv], { type:'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
@@ -456,10 +481,10 @@ async function downloadHistory(tokenAddr, name, symbol){
 }
 async function handleClaim(tokenAddr){
   try{
-    setSt('claimStatus','Claiming\u2026','info');
+    setSt('claimStatus','Claiming (confirm in MetaMask)\u2026','info');
     await (await contract('PropertyToken', tokenAddr).claimYield()).wait();
     setSt('claimStatus','Claimed. (Rupee payout happens off-chain; this records the entitlement as settled.)','ok');
-    setTimeout(()=>renderPropertyDetail(tokenAddr), 900);
+    setTimeout(()=>renderPropertyDetail(tokenAddr), 1000);
   }catch(e){ setSt('claimStatus', prettyErr(e), 'err'); }
 }
 
@@ -491,7 +516,7 @@ async function handleRegister(){
     const symbol = document.getElementById('pSymbol').value.trim();
     const shares = BigInt(document.getElementById('pShares').value);
     const docHash = ethers.keccak256(ethers.toUtf8Bytes(document.getElementById('pDoc').value));
-    setSt('regStatus','Registering on-chain\u2026','info');
+    setSt('regStatus','Registering on-chain (confirm in MetaMask)\u2026','info');
     const factory = contract('PropertyTokenFactory');
     const rc = await (await factory.registerLand(name, symbol, shares, docHash, 'demo')).wait();
     let tokenAddr;
@@ -588,8 +613,10 @@ function prettyErr(e){
   const m = e.reason || e.shortMessage || e.message || String(e);
   if(m.includes('KYC')) return 'This account is not verified for trading.';
   if(m.includes('Only property owner')) return 'Only the property owner can distribute rent.';
-  if(m.includes('Only seller')) return 'Only the seller can settle their own listing.';
+  if(m.includes('Seller cannot buy')) return 'You can\u2019t buy your own listing.';
+  if(m.includes('Not seller')) return 'Only the seller can cancel this listing.';
   if(m.includes('Nothing to claim')) return 'Nothing to claim yet.';
+  if(m.includes('Invalid amount')) return 'That quantity isn\u2019t available.';
   if(m.includes('could not detect network')||m.includes('failed to detect')) return 'Cannot reach the network. Check your connection and that MetaMask is on Sepolia.';
   return m.length>140 ? m.slice(0,140)+'\u2026' : m;
 }

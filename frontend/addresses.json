@@ -1,7 +1,7 @@
 {
   "network": "sepolia",
   "rpc": "https://eth-sepolia.g.alchemy.com/v2/alch_CCC8s5a-dxv-tBGyY6DPh",
-  "whitelist": "0x3510671d4a907e52B9c0675323bc96e3AF51ed1c",
-  "factory": "0x20e102E9Dfff0BAa12EE622B263595D4Ea2403d6",
-  "marketplace": "0x9AB191A87878A0D3E2cd658830D4f3798aB5Df8C"
+  "whitelist": "0x94B1778104ebD149335cdf520ED1A84EE27AddBb",
+  "factory": "0xDd40A1f351e97A4552Cacbeb60Fa24fA14E39b06",
+  "marketplace": "0x08638964f1930b4D88Da6C1799f3DFF3c4CA27cD"
 }
