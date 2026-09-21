@@ -1,24 +1,22 @@
 /* ============================================================
    Parcel — app.js
    Real self-custody build: users connect their own MetaMask
-   wallet on Sepolia and sign their own transactions. Known team
-   wallets are shown by name; any other wallet shows its address.
+   wallet on Sepolia and sign their own transactions.
    Ownership is recorded on-chain; payment/rent are rupees off-chain.
+   Buying is real-time: shares are escrowed at listing, so a buyer
+   completes a purchase in one click from their own wallet.
    ============================================================ */
 
-let CONFIG = null, ABIS = null, provider = null;      // provider = read-only (Sepolia RPC)
-let session = null;                                    // { name, role, address, signer }
+let CONFIG = null, ABIS = null, provider = null;
+let session = null; // { name, role, address, signer }
 
-/* ---- Known team wallets -> friendly name/role.
-   Lowercase the address keys. Any wallet not listed here still works;
-   it just shows as its shortened address. FILL IN when addresses arrive. ---- */
 const NAMES = {
-  "0x38331533814a12e238d8d7329d56fdeb9b46a6a4": { name:"Arya",    role:"Property Owner" },
-  "0x4df0b8779cd4ea20f1bd27e114b7cd4bf756b0c3": { name:"Ronan",   role:"Investor" },
-  // "0xRISHABH_ADDRESS_LOWERCASE": { name:"Rishabh", role:"Investor" },
+  "0x38331533814a12e238d8d7329d56fdeb9b46a6a4": { name:"Arya",  role:"Property Owner" },
+  "0x4df0b8779cd4ea20f1bd27e114b7cd4bf756b0c3": { name:"Ronan", role:"Investor" },
+  // "0xrishabh_address_lowercase": { name:"Rishabh", role:"Investor" },
 };
 
-const SEPOLIA_CHAIN_ID = "0xaa36a7"; // 11155111 in hex
+const SEPOLIA_CHAIN_ID = "0xaa36a7";
 
 /* ---------------- boot ---------------- */
 async function boot(){
@@ -28,7 +26,6 @@ async function boot(){
       fetch('./abis.json').then(r=>r.json()),
     ]);
     CONFIG = addr; ABIS = abis;
-    // read-only provider for viewing the chain without a wallet connected
     provider = new ethers.JsonRpcProvider(CONFIG.rpc);
   }catch(e){
     document.getElementById('app').innerHTML =
@@ -37,7 +34,6 @@ async function boot(){
     return;
   }
 
-  // react to the user switching accounts or networks in MetaMask
   if(window.ethereum){
     window.ethereum.on('accountsChanged', ()=>{ session=null; connectWallet(true); });
     window.ethereum.on('chainChanged', ()=>window.location.reload());
@@ -52,31 +48,24 @@ const CONFIG_KEY = { Whitelist:'whitelist', PropertyTokenFactory:'factory', Mark
 function contract(name, addrOverride){
   const addr = addrOverride || CONFIG[CONFIG_KEY[name]];
   if(!addr) throw new Error('No address configured for '+name+'.');
-  // writes use the connected wallet's signer; reads can use the plain provider
   const signerOrProvider = session ? session.signer : provider;
   return new ethers.Contract(addr, ABIS[name], signerOrProvider);
 }
 function short(a){ return a.slice(0,6)+'\u2026'+a.slice(-4); }
 function initials(name){ return name.split(' ').map(w=>w[0]).join('').toUpperCase().slice(0,2); }
 function rupee(n){ return '\u20B9'+Number(n).toLocaleString('en-IN'); }
-function nameFor(addr){
-  const known = NAMES[addr.toLowerCase()];
-  return known ? known.name : short(addr);
-}
-function roleFor(addr){
-  const known = NAMES[addr.toLowerCase()];
-  return known ? known.role : 'Investor';
-}
+function nameFor(addr){ const k=NAMES[addr.toLowerCase()]; return k?k.name:short(addr); }
+function roleFor(addr){ const k=NAMES[addr.toLowerCase()]; return k?k.role:'Investor'; }
 
-/* ---------------- wallet connect (replaces login) ---------------- */
+/* ---------------- wallet connect ---------------- */
 async function connectWallet(silent){
   if(!window.ethereum){
     if(!silent) alert('MetaMask not found. Please install the MetaMask browser extension, then reload.');
-    return { ok:false, error:'no-metamask' };
+    return { ok:false };
   }
   try{
     const accounts = await window.ethereum.request({ method:'eth_requestAccounts' });
-    if(!accounts || !accounts.length) return { ok:false, error:'no-account' };
+    if(!accounts || !accounts.length) return { ok:false };
 
     const chainId = await window.ethereum.request({ method:'eth_chainId' });
     if(chainId !== SEPOLIA_CHAIN_ID){
@@ -87,14 +76,13 @@ async function connectWallet(silent){
         });
       }catch(switchErr){
         if(!silent) alert('Please switch MetaMask to the Sepolia test network, then connect again.');
-        return { ok:false, error:'wrong-network' };
+        return { ok:false };
       }
     }
 
     const browserProvider = new ethers.BrowserProvider(window.ethereum);
     const signer = await browserProvider.getSigner();
     const address = await signer.getAddress();
-
     session = { name:nameFor(address), role:roleFor(address), address, signer };
     render();
     return { ok:true };
@@ -103,14 +91,11 @@ async function connectWallet(silent){
       const msg = (e && e.code === 4001) ? 'Connection request was rejected.' : (e.message || 'Could not connect.');
       alert(msg);
     }
-    return { ok:false, error:e };
+    return { ok:false };
   }
 }
 function logout(){ session = null; location.hash = '#/'; render(); }
-function requireLogin(){
-  if(!session){ connectWallet(false); return false; }
-  return true;
-}
+function requireLogin(){ if(!session){ connectWallet(false); return false; } return true; }
 
 /* ---------------- router ---------------- */
 const routes = {
@@ -124,13 +109,11 @@ async function render(){
   const hash = location.hash.replace(/^#/,'') || '/';
   const app = document.getElementById('app');
   app.innerHTML = '<div class="loading">Loading\u2026</div>';
-
   if(hash.startsWith('/properties/') && hash !== '/properties/'){
     const addr = decodeURIComponent(hash.split('/properties/')[1]);
     return renderPropertyDetail(addr);
   }
-  const fn = routes[hash] || renderHome;
-  fn();
+  (routes[hash] || renderHome)();
 }
 
 function renderNav(){
@@ -187,7 +170,7 @@ function renderHome(){
   loadPropertyCards('homeProps', 3);
 }
 
-/* ================= PROPERTIES (browse) ================= */
+/* ================= PROPERTIES ================= */
 async function renderProperties(){
   document.getElementById('app').innerHTML = `
     <div class="page container">
@@ -205,11 +188,14 @@ async function loadPropertyCards(targetId, limit){
   const el = document.getElementById(targetId);
   try{
     const factory = contract('PropertyTokenFactory');
-    let all = await factory.getAllTokens();
-    if(limit) all = all.slice(0, limit);
-    if(all.length===0){ el.innerHTML = '<div class="empty">No properties registered yet. Be the first to <a href="#/list-property" style="color:var(--blue);font-weight:600">list one</a>.</div>'; return; }
+    const all = await Promise.race([
+      factory.getAllTokens(),
+      new Promise((_,rej)=>setTimeout(()=>rej(new Error('Timed out reading the chain. Check that addresses.json/abis.json match your latest deploy and MetaMask is on Sepolia.')), 15000))
+    ]);
+    let list = limit ? all.slice(0, limit) : all;
+    if(list.length===0){ el.innerHTML = '<div class="empty">No properties registered yet. Be the first to <a href="#/list-property" style="color:var(--blue);font-weight:600">list one</a>.</div>'; return; }
     let cards = '';
-    for(const t of all){
+    for(const t of list){
       const tk = new ethers.Contract(t, ABIS.PropertyToken, provider);
       let name='Property', supply=0n, symbol='';
       try{ name=await tk.name(); supply=await tk.totalSupply(); symbol=await tk.symbol(); }catch{}
@@ -226,7 +212,7 @@ async function loadPropertyCards(targetId, limit){
       </div>`;
     }
     el.innerHTML = cards;
-  }catch(e){ el.innerHTML = '<div class="empty">Could not load properties: '+(e.message||e)+'</div>'; }
+  }catch(e){ el.innerHTML = '<div class="empty" style="color:var(--err)">Could not load properties: '+(e.message||e)+'</div>'; }
 }
 
 /* ================= PROPERTY DETAIL ================= */
@@ -300,7 +286,7 @@ async function renderPropertyDetail(tokenAddr){
               <input id="listPrice" type="number" value="5000" />
               <button class="btn block" style="margin-top:14px" onclick="handleList('${tokenAddr}')">Approve &amp; List</button>
               <div id="listStatus" class="status"></div>
-            ` : `<div class="note">${session?'No shares to list.':'Log in first.'}</div>`}
+            ` : `<div class="note">${session?'No shares to list.':'Connect first.'}</div>`}
           </div>
         </div>
 
@@ -353,10 +339,7 @@ async function handleCancel(id, tokenAddr){
   }catch(e){ alert(prettyErr(e)); }
 }
 
-/* Real-time buy. The seller already escrowed the shares by listing, and
-   permitted the sale then. So a buyer completes the purchase in one click
-   from their own wallet — no seller involvement, instant. Rupee payment is
-   off-chain and assumed complete for the demo. */
+/* Real-time buy — one click, one signature, no seller involvement. */
 function openBuy(listingId, remainingStr, priceStr, tokenAddr){
   const remaining = BigInt(remainingStr), price = BigInt(priceStr);
   const defaultQty = remaining < 10n ? remaining : 10n;
@@ -407,18 +390,13 @@ async function handleDeposit(tokenAddr){
   }catch(e){ setSt('yieldStatus', prettyErr(e), 'err'); }
 }
 
-/* Download the full on-chain ownership history for a property as CSV.
-   Alchemy's free tier limits eth_getLogs to a 10-block range per call,
-   so we scan in 10-block chunks, starting near the token's creation
-   (found from the Factory's LandRegistered event) rather than block 0. */
+/* Download full on-chain ownership history as CSV, chunked for Alchemy free tier. */
 async function downloadHistory(tokenAddr, name, symbol){
   try{
-    const CHUNK = 10; // free-tier eth_getLogs block-range cap
+    const CHUNK = 10;
     const latest = await provider.getBlockNumber();
-
-    // find the token's creation block via the Factory event (bounded scan)
     const factory = new ethers.Contract(CONFIG.factory, ABIS.PropertyTokenFactory, provider);
-    let startBlock = Math.max(0, latest - 4900); // safety floor
+    let startBlock = Math.max(0, latest - 4900);
     try{
       const filter = factory.filters.LandRegistered(null, tokenAddr);
       for(let to = latest; to >= 0; to -= CHUNK){
@@ -427,9 +405,7 @@ async function downloadHistory(tokenAddr, name, symbol){
         if(found.length){ startBlock = found[0].blockNumber; break; }
         if(from === 0) break;
       }
-    }catch{ /* keep safety-floor startBlock */ }
-
-    // scan Transfer events 10 blocks at a time
+    }catch{}
     const tk = new ethers.Contract(tokenAddr, ABIS.PropertyToken, provider);
     const transferFilter = tk.filters.Transfer();
     let events = [];
@@ -438,47 +414,29 @@ async function downloadHistory(tokenAddr, name, symbol){
       const batch = await tk.queryFilter(transferFilter, from, to);
       events = events.concat(batch);
     }
-
     const ZERO = '0x0000000000000000000000000000000000000000';
     const csvCell = s => { s = String(s); return /[",\n]/.test(s) ? '"'+s.replace(/"/g,'""')+'"' : s; };
     const headerRow = ['#','Type','From','To','Shares','Block','Transaction Hash'];
     const rows = events.map((e,i)=>{
       const isMint = e.args.from === ZERO;
-      return [
-        i+1,
-        isMint ? 'Mint (initial issue)' : 'Transfer',
-        isMint ? '(newly minted)' : e.args.from,
-        e.args.to,
-        e.args.value.toString(),
-        e.blockNumber,
-        e.transactionHash,
-      ];
+      return [ i+1, isMint?'Mint (initial issue)':'Transfer', isMint?'(newly minted)':e.args.from,
+        e.args.to, e.args.value.toString(), e.blockNumber, e.transactionHash ];
     });
-
     const meta = [
-      ['Property', name],
-      ['Token Symbol', symbol],
-      ['Token Contract', tokenAddr],
-      ['Network', CONFIG.network || 'sepolia'],
-      ['Exported', new Date().toLocaleString()],
-      ['Total Records', rows.length],
-      [],
+      ['Property', name],['Token Symbol', symbol],['Token Contract', tokenAddr],
+      ['Network', CONFIG.network || 'sepolia'],['Exported', new Date().toLocaleString()],
+      ['Total Records', rows.length],[],
     ];
     const csv = [...meta, headerRow, ...rows].map(r => r.map(csvCell).join(',')).join('\n');
-
     const blob = new Blob([csv], { type:'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
-    a.href = url;
-    a.download = `${symbol||'property'}_ownership_history.csv`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
+    a.href = url; a.download = `${symbol||'property'}_ownership_history.csv`;
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
     URL.revokeObjectURL(url);
-  }catch(e){
-    alert('Could not export history: ' + (e.message || e));
-  }
+  }catch(e){ alert('Could not export history: ' + (e.message || e)); }
 }
+
 async function handleClaim(tokenAddr){
   try{
     setSt('claimStatus','Claiming (confirm in MetaMask)\u2026','info');
@@ -488,7 +446,7 @@ async function handleClaim(tokenAddr){
   }catch(e){ setSt('claimStatus', prettyErr(e), 'err'); }
 }
 
-/* ================= LIST PROPERTY (register) ================= */
+/* ================= LIST PROPERTY ================= */
 function renderListProperty(){
   if(!requireLogin()) return;
   document.getElementById('app').innerHTML = `
@@ -577,13 +535,11 @@ async function renderDashboard(){
           <h1>Welcome back, ${session.name}</h1>
           <p>${session.role} &middot; ${short(session.address)}</p>
         </div>
-
         <div class="grid-3" style="margin-bottom:24px">
           <div class="stat-card"><div class="label">Properties Held</div><div class="value">${totalProps}</div></div>
           <div class="stat-card"><div class="label">Claimable Rent (Total)</div><div class="value gold">${rupee(totalPending)}</div></div>
           <div class="stat-card"><div class="label">Active Listings</div><div class="value">${myActiveListings}</div></div>
         </div>
-
         <div class="card">
           <div class="section-title">Your Holdings</div>
           <div class="section-sub">Properties you own shares in.</div>
@@ -592,7 +548,6 @@ async function renderDashboard(){
             <tbody>${holdingRows || '<tr><td colspan=4 class="empty">No holdings yet. <a href="#/properties" style="color:var(--blue);font-weight:600">Browse properties</a> or <a href="#/list-property" style="color:var(--blue);font-weight:600">register one</a>.</td></tr>'}</tbody>
           </table>
         </div>
-
         <div class="card">
           <div class="section-title">Your Active Listings</div>
           <div class="section-sub">Shares you currently have for sale.</div>
@@ -607,7 +562,7 @@ async function renderDashboard(){
   }
 }
 
-/* ---------------- shared helpers ---------------- */
+/* ---------------- helpers ---------------- */
 function setSt(id,msg,kind){ const el=document.getElementById(id); if(!el)return; el.textContent=msg; el.className='status show '+kind; }
 function prettyErr(e){
   const m = e.reason || e.shortMessage || e.message || String(e);
@@ -617,6 +572,7 @@ function prettyErr(e){
   if(m.includes('Not seller')) return 'Only the seller can cancel this listing.';
   if(m.includes('Nothing to claim')) return 'Nothing to claim yet.';
   if(m.includes('Invalid amount')) return 'That quantity isn\u2019t available.';
+  if(m.includes('is not a function')) return 'App/contract mismatch \u2014 recopy abis.json from your latest deploy.';
   if(m.includes('could not detect network')||m.includes('failed to detect')) return 'Cannot reach the network. Check your connection and that MetaMask is on Sepolia.';
   return m.length>140 ? m.slice(0,140)+'\u2026' : m;
 }
