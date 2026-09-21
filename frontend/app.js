@@ -5,28 +5,39 @@
    Ownership is recorded on-chain; payment/rent are rupees off-chain.
    Buying is real-time: shares are escrowed at listing, so a buyer
    completes a purchase in one click from their own wallet.
+
+   Transaction reliability:
+   - Every write is pre-flighted through the Alchemy read provider
+     (simulates the call, estimates gas, surfaces revert reasons such
+     as "not KYC-approved" BEFORE MetaMask is involved).
+   - MetaMask is asked for exactly ONE thing: eth_sendTransaction
+     (the signature popup), with gas already filled in.
+   - Confirmation is watched through Alchemy, not through MetaMask.
+   - Timeouts everywhere, and [tx] logs in the browser console.
    ============================================================ */
 
-let CONFIG = null, ABIS = null, provider = null;
-let session = null; // { name, role, address, signer }
+let CONFIG = null, ABIS = null, provider = null;   // provider = read-only (Alchemy / Sepolia RPC)
+let session = null;                                 // { name, role, address }
 
+/* ---- Known team wallets -> friendly name/role (lowercase keys) ---- */
 const NAMES = {
   "0x38331533814a12e238d8d7329d56fdeb9b46a6a4": { name:"Arya",  role:"Property Owner" },
   "0x4df0b8779cd4ea20f1bd27e114b7cd4bf756b0c3": { name:"Ronan", role:"Investor" },
   // "0xrishabh_address_lowercase": { name:"Rishabh", role:"Investor" },
 };
 
-const SEPOLIA_CHAIN_ID = "0xaa36a7";
+const SEPOLIA_CHAIN_ID = "0xaa36a7"; // 11155111
 
 /* ---------------- boot ---------------- */
 async function boot(){
   try{
     const [addr, abis] = await Promise.all([
-      fetch('./addresses.json').then(r=>r.json()),
-      fetch('./abis.json').then(r=>r.json()),
+      fetch('./addresses.json', { cache:'no-store' }).then(r=>r.json()),
+      fetch('./abis.json',      { cache:'no-store' }).then(r=>r.json()),
     ]);
     CONFIG = addr; ABIS = abis;
-    provider = new ethers.JsonRpcProvider(CONFIG.rpc);
+    provider = new ethers.JsonRpcProvider(CONFIG.rpc, 11155111, { staticNetwork: true });
+    console.log('[parcel] config loaded', CONFIG);
   }catch(e){
     document.getElementById('app').innerHTML =
       '<div class="page container"><div class="status show err">Could not load contract config. '+
@@ -35,61 +46,114 @@ async function boot(){
   }
 
   if(window.ethereum){
-    window.ethereum.on('accountsChanged', ()=>{ session=null; connectWallet(true); });
+    window.ethereum.on('accountsChanged', (accs)=>{
+      session = null;
+      if(accs && accs.length) connectWallet(true); else render();
+    });
     window.ethereum.on('chainChanged', ()=>window.location.reload());
+    // silently restore an existing connection (no popup)
+    try{
+      const accs = await window.ethereum.request({ method:'eth_accounts' });
+      if(accs && accs.length) await connectWallet(true);
+    }catch{}
   }
 
   window.addEventListener('hashchange', render);
   render();
 }
 
-/* ---------------- contract helpers ---------------- */
+/* ---------------- helpers ---------------- */
 const CONFIG_KEY = { Whitelist:'whitelist', PropertyTokenFactory:'factory', Marketplace:'marketplace' };
-function contract(name, addrOverride){
+function addrFor(name, addrOverride){
   const addr = addrOverride || CONFIG[CONFIG_KEY[name]];
   if(!addr) throw new Error('No address configured for '+name+'.');
-  const signerOrProvider = session ? session.signer : provider;
-  return new ethers.Contract(addr, ABIS[name], signerOrProvider);
+  return addr;
+}
+function readContract(name, addrOverride){
+  return new ethers.Contract(addrFor(name, addrOverride), ABIS[name], provider);
 }
 function short(a){ return a.slice(0,6)+'\u2026'+a.slice(-4); }
 function initials(name){ return name.split(' ').map(w=>w[0]).join('').toUpperCase().slice(0,2); }
 function rupee(n){ return '\u20B9'+Number(n).toLocaleString('en-IN'); }
 function nameFor(addr){ const k=NAMES[addr.toLowerCase()]; return k?k.name:short(addr); }
 function roleFor(addr){ const k=NAMES[addr.toLowerCase()]; return k?k.role:'Investor'; }
+function esc(s){ return String(s).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function withTimeout(p, ms, msg){
+  let t; return Promise.race([p, new Promise((_,rej)=>{ t=setTimeout(()=>rej(new Error(msg)), ms); })])
+    .finally(()=>clearTimeout(t));
+}
+
+/* ---------------- the one write path ----------------
+   1) simulate + estimate gas via Alchemy (no MetaMask)
+   2) ask MetaMask ONLY to sign & send (eth_sendTransaction)
+   3) wait for the receipt via Alchemy                         */
+async function sendTx(statusId, label, contractName, addrOverride, method, args){
+  if(!session) throw new Error('Connect your wallet first.');
+  const to = addrFor(contractName, addrOverride);
+  const readC = new ethers.Contract(to, ABIS[contractName], provider);
+  if(typeof readC[method] !== 'function') throw new Error(method+' is not a function');
+
+  // make sure MetaMask is still on Sepolia
+  const chainId = await withTimeout(window.ethereum.request({ method:'eth_chainId' }), 10000,
+    'MetaMask is not responding. Click the MetaMask icon to unlock it, then try again.');
+  if(chainId !== SEPOLIA_CHAIN_ID) throw new Error('MetaMask is not on Sepolia. Switch network and try again.');
+
+  console.log('[tx]', label, '\u2014 preflight via RPC\u2026', method, args);
+  setSt(statusId, label+' \u2014 checking\u2026', 'info');
+  const gas = await withTimeout(readC[method].estimateGas(...args, { from: session.address }), 20000,
+    'Network check timed out. Check your internet connection and try again.');
+  const gasLimit = gas * 13n / 10n;
+  const data = readC.interface.encodeFunctionData(method, args);
+  console.log('[tx]', label, '\u2014 preflight OK, gas', gas.toString(), '\u2014 requesting signature');
+
+  setSt(statusId, label+' \u2014 confirm in MetaMask\u2026', 'info');
+  const hash = await withTimeout(
+    window.ethereum.request({
+      method: 'eth_sendTransaction',
+      params: [{ from: session.address, to, data, gas: ethers.toQuantity(gasLimit) }],
+    }),
+    120000,
+    'MetaMask did not respond. Click the MetaMask icon (a request may be waiting there), or reload the page and reconnect.');
+  console.log('[tx]', label, '\u2014 sent', hash);
+
+  setSt(statusId, label+' \u2014 waiting for Sepolia confirmation (~15s)\u2026', 'info');
+  const rc = await provider.waitForTransaction(hash, 1, 180000).catch(()=>null);
+  if(!rc) throw new Error('Sent but not confirmed yet. Check sepolia.etherscan.io/tx/'+hash);
+  if(rc.status === 0) throw new Error('Transaction reverted on-chain. See sepolia.etherscan.io/tx/'+hash);
+  console.log('[tx]', label, '\u2014 confirmed in block', rc.blockNumber);
+  return rc;
+}
 
 /* ---------------- wallet connect ---------------- */
 async function connectWallet(silent){
   if(!window.ethereum){
-    if(!silent) alert('MetaMask not found. Please install the MetaMask browser extension, then reload.');
+    if(!silent) alert('MetaMask not found. Install the MetaMask extension, then reload.');
     return { ok:false };
   }
   try{
-    const accounts = await window.ethereum.request({ method:'eth_requestAccounts' });
+    const accounts = await window.ethereum.request({ method: silent ? 'eth_accounts' : 'eth_requestAccounts' });
     if(!accounts || !accounts.length) return { ok:false };
 
     const chainId = await window.ethereum.request({ method:'eth_chainId' });
     if(chainId !== SEPOLIA_CHAIN_ID){
+      if(silent) return { ok:false };
       try{
-        await window.ethereum.request({
-          method:'wallet_switchEthereumChain',
-          params:[{ chainId: SEPOLIA_CHAIN_ID }],
-        });
-      }catch(switchErr){
-        if(!silent) alert('Please switch MetaMask to the Sepolia test network, then connect again.');
+        await window.ethereum.request({ method:'wallet_switchEthereumChain', params:[{ chainId: SEPOLIA_CHAIN_ID }] });
+      }catch{
+        alert('Please switch MetaMask to the Sepolia test network, then connect again.');
         return { ok:false };
       }
     }
-
-    const browserProvider = new ethers.BrowserProvider(window.ethereum);
-    const signer = await browserProvider.getSigner();
-    const address = await signer.getAddress();
-    session = { name:nameFor(address), role:roleFor(address), address, signer };
+    const address = ethers.getAddress(accounts[0]);
+    session = { name:nameFor(address), role:roleFor(address), address };
+    console.log('[parcel] connected', address);
     render();
     return { ok:true };
   }catch(e){
     if(!silent){
-      const msg = (e && e.code === 4001) ? 'Connection request was rejected.' : (e.message || 'Could not connect.');
-      alert(msg);
+      alert(e && e.code === 4001 ? 'Connection request was rejected.'
+        : e && e.code === -32002 ? 'A MetaMask request is already open. Click the MetaMask icon to finish it.'
+        : (e.message || 'Could not connect.'));
     }
     return { ok:false };
   }
@@ -110,8 +174,7 @@ async function render(){
   const app = document.getElementById('app');
   app.innerHTML = '<div class="loading">Loading\u2026</div>';
   if(hash.startsWith('/properties/') && hash !== '/properties/'){
-    const addr = decodeURIComponent(hash.split('/properties/')[1]);
-    return renderPropertyDetail(addr);
+    return renderPropertyDetail(decodeURIComponent(hash.split('/properties/')[1]));
   }
   (routes[hash] || renderHome)();
 }
@@ -130,7 +193,7 @@ function renderNav(){
       </div>
       <div class="nav-right">
         ${session
-          ? `<div class="user-chip"><span class="avatar">${initials(session.name)}</span>${session.name}
+          ? `<div class="user-chip"><span class="avatar">${initials(session.name)}</span>${esc(session.name)}
               <button class="btn-logout" onclick="logout()">Disconnect</button></div>`
           : `<button class="btn-login-nav" onclick="connectWallet(false)">Connect Wallet</button>`}
       </div>
@@ -149,7 +212,7 @@ function renderHome(){
            are handled in rupees, off-chain.</p>
         <div class="hero-actions">
           <button class="btn gold" onclick="location.hash='#/properties'">Browse Properties</button>
-          <button class="btn ghost" onclick="connectWallet(false)">Connect Wallet</button>
+          ${session?'':'<button class="btn ghost" onclick="connectWallet(false)">Connect Wallet</button>'}
         </div>
       </div>
     </section>
@@ -171,7 +234,7 @@ function renderHome(){
 }
 
 /* ================= PROPERTIES ================= */
-async function renderProperties(){
+function renderProperties(){
   document.getElementById('app').innerHTML = `
     <div class="page container">
       <div class="page-head">
@@ -187,32 +250,35 @@ async function renderProperties(){
 async function loadPropertyCards(targetId, limit){
   const el = document.getElementById(targetId);
   try{
-    const factory = contract('PropertyTokenFactory');
-    const all = await Promise.race([
-      factory.getAllTokens(),
-      new Promise((_,rej)=>setTimeout(()=>rej(new Error('Timed out reading the chain. Check that addresses.json/abis.json match your latest deploy and MetaMask is on Sepolia.')), 15000))
-    ]);
-    let list = limit ? all.slice(0, limit) : all;
-    if(list.length===0){ el.innerHTML = '<div class="empty">No properties registered yet. Be the first to <a href="#/list-property" style="color:var(--blue);font-weight:600">list one</a>.</div>'; return; }
-    let cards = '';
-    for(const t of list){
+    let all = await withTimeout(readContract('PropertyTokenFactory').getAllTokens(), 15000,
+      'Timed out reaching Sepolia. Check the rpc URL in addresses.json.');
+    all = [...all].reverse();               // newest first
+    if(limit) all = all.slice(0, limit);
+    if(!el) return;
+    if(all.length===0){
+      el.innerHTML = '<div class="empty">No properties registered yet. Be the first to <a href="#/list-property" style="color:var(--blue);font-weight:600">list one</a>.</div>';
+      return;
+    }
+    const cards = await Promise.all(all.map(async t=>{
       const tk = new ethers.Contract(t, ABIS.PropertyToken, provider);
       let name='Property', supply=0n, symbol='';
-      try{ name=await tk.name(); supply=await tk.totalSupply(); symbol=await tk.symbol(); }catch{}
-      cards += `<div class="prop-card" onclick="location.hash='#/properties/${t}'">
-        <div class="thumb">${symbol||'PARCEL'}</div>
+      try{ [name, supply, symbol] = await Promise.all([tk.name(), tk.totalSupply(), tk.symbol()]); }catch{}
+      return `<div class="prop-card" onclick="location.hash='#/properties/${t}'">
+        <div class="thumb">${esc(symbol||'PARCEL')}</div>
         <div class="body">
-          <h3>${name}</h3>
+          <h3>${esc(name)}</h3>
           <div class="meta">${short(t)}</div>
           <div class="prop-stats">
             <div><span>Total Shares</span><b>${supply.toString()}</b></div>
-            <div><span>Token</span><b>${symbol}</b></div>
+            <div><span>Token</span><b>${esc(symbol)}</b></div>
           </div>
         </div>
       </div>`;
-    }
-    el.innerHTML = cards;
-  }catch(e){ el.innerHTML = '<div class="empty" style="color:var(--err)">Could not load properties: '+(e.message||e)+'</div>'; }
+    }));
+    el.innerHTML = cards.join('');
+  }catch(e){
+    if(el) el.innerHTML = '<div class="empty" style="color:#b3261e">Could not load properties: '+esc(e.shortMessage||e.message||e)+'</div>';
+  }
 }
 
 /* ================= PROPERTY DETAIL ================= */
@@ -221,45 +287,49 @@ async function renderPropertyDetail(tokenAddr){
   app.innerHTML = '<div class="page container"><div class="loading">Loading property\u2026</div></div>';
   try{
     const tk = new ethers.Contract(tokenAddr, ABIS.PropertyToken, provider);
-    const [name, symbol, supply, docHash, registrant] = await Promise.all([
+    const [name, symbol, supply, docHash, registrant] = await withTimeout(Promise.all([
       tk.name(), tk.symbol(), tk.totalSupply(), tk.docHash(), tk.registrant()
-    ]);
+    ]), 15000, 'Timed out reaching Sepolia.');
 
     const me = session ? session.address : null;
-    const myBalance = me ? await tk.balanceOf(me) : 0n;
-    const myPending = me ? await tk.pendingYield(me) : 0n;
+    const [myBalance, myPending] = me
+      ? await Promise.all([tk.balanceOf(me), tk.pendingYield(me)])
+      : [0n, 0n];
     const isOwner = me && me.toLowerCase()===registrant.toLowerCase();
 
-    const market = contract('Marketplace');
+    const market = readContract('Marketplace');
     const n = Number(await market.nextListingId());
-    let listingRows = '';
-    for(let i=0;i<n;i++){
-      const l = await market.listings(i);
-      if(l[1].toLowerCase() !== tokenAddr.toLowerCase()) continue;
-      if(!l[4] && l[2]===0n) continue;
-      const isSeller = me && l[0].toLowerCase()===me.toLowerCase();
-      listingRows += `<tr>
-        <td>${short(l[0])}${isSeller?' <span class="tag-onchain">you</span>':''}</td>
-        <td>${l[2].toString()}</td>
-        <td class="rupee">${rupee(l[3])}</td>
-        <td>${l[4]?'<span class="pill active">active</span>':'<span class="pill closed">closed</span>'}</td>
-        <td>${
-          !l[4] ? '\u2014'
-          : !me ? `<button class="btn small outline" onclick="connectWallet(false)">Connect to buy</button>`
-          : isSeller ? `<button class="btn small ghost" onclick="handleCancel(${i}, '${tokenAddr}')">Cancel listing</button>`
-          : `<button class="btn small gold" onclick="openBuy(${i}, '${l[2].toString()}', '${l[3].toString()}', '${tokenAddr}')">Buy</button>`
-        }</td>
-      </tr>`;
-    }
+    const all = await Promise.all(Array.from({length:n}, (_,i)=>market.listings(i)));
 
+    let listingRows = '';
+    all.forEach((l,i)=>{
+      if(l[1].toLowerCase() !== tokenAddr.toLowerCase()) return;
+      const [seller, , remaining, price, active] = l;
+      const isSeller = me && seller.toLowerCase()===me.toLowerCase();
+      let action = '\u2014';
+      if(active){
+        if(!me) action = `<button class="btn small outline" onclick="connectWallet(false)">Connect to buy</button>`;
+        else if(isSeller) action = `<button class="btn small outline" onclick="handleCancel(${i}, '${tokenAddr}')">Cancel listing</button>`;
+        else action = `<button class="btn small gold" onclick="openBuy(${i}, '${remaining}', '${price}', '${tokenAddr}')">Buy</button>`;
+      }
+      listingRows += `<tr>
+        <td>${esc(nameFor(seller))}${isSeller?' <span class="tag-onchain">you</span>':''}</td>
+        <td>${remaining.toString()}</td>
+        <td class="rupee">${rupee(price)}</td>
+        <td>${active?'<span class="pill active">active</span>':'<span class="pill closed">closed</span>'}</td>
+        <td>${action}</td>
+      </tr>`;
+    });
+
+    const safeName = String(name).replace(/['"\\]/g,'');
     app.innerHTML = `
       <div class="page container">
         <a href="#/properties" class="back-link">&larr; All Properties</a>
         <div class="page-head">
-          <span class="kicker">${symbol}</span>
-          <h1>${name}</h1>
-          <p>${supply.toString()} total shares &middot; registered by ${short(registrant)}${isOwner?' (you)':''} &middot; document hash <span class="badge">${docHash.slice(0,14)}\u2026</span></p>
-          <button class="btn outline small" style="margin-top:14px" onclick="downloadHistory('${tokenAddr}', '${name.replace(/'/g,"")}', '${symbol}')">&darr; Download Ownership History (CSV)</button>
+          <span class="kicker">${esc(symbol)}</span>
+          <h1>${esc(name)}</h1>
+          <p>${supply.toString()} total shares &middot; registered by ${esc(nameFor(registrant))}${isOwner?' (you)':''} &middot; document hash <span class="badge">${docHash.slice(0,14)}\u2026</span></p>
+          <button id="dlBtn" class="btn outline small" style="margin-top:14px" onclick="downloadHistory('${tokenAddr}', '${esc(safeName)}', '${esc(symbol)}')">&darr; Download Ownership History (CSV)</button>
         </div>
 
         <div class="grid-2">
@@ -278,15 +348,15 @@ async function renderPropertyDetail(tokenAddr){
 
           <div class="card">
             <div class="section-title">List Your Shares</div>
-            <div class="section-sub">${myBalance>0n?'Offer some of your shares for resale.':'You need shares in this property to list them.'}</div>
+            <div class="section-sub">${myBalance>0n?'Offer some of your shares for resale. They are held in escrow until sold or cancelled.':'You need shares in this property to list them.'}</div>
             ${session && myBalance>0n ? `
               <label>Shares to list (you hold ${myBalance.toString()})</label>
-              <input id="listAmt" type="number" value="${myBalance.toString()>50?50:1}" />
+              <input id="listAmt" type="number" min="1" max="${myBalance}" value="${myBalance>50n?50:1}" />
               <label>Price per share (\u20B9)</label>
-              <input id="listPrice" type="number" value="5000" />
+              <input id="listPrice" type="number" min="1" value="5000" />
               <button class="btn block" style="margin-top:14px" onclick="handleList('${tokenAddr}')">Approve &amp; List</button>
               <div id="listStatus" class="status"></div>
-            ` : `<div class="note">${session?'No shares to list.':'Connect first.'}</div>`}
+            ` : `<div class="note">${session?'No shares to list.':'Connect your wallet first.'}</div>`}
           </div>
         </div>
 
@@ -295,7 +365,7 @@ async function renderPropertyDetail(tokenAddr){
           <div class="section-title">Distribute Rent</div>
           <div class="section-sub">As the property owner, record a rent distribution in rupees. It splits automatically, pro-rata, across every shareholder.</div>
           <div class="grid-2">
-            <div><label>Amount to distribute (\u20B9)</label><input id="yieldAmt" type="number" value="100000" /></div>
+            <div><label>Amount to distribute (\u20B9)</label><input id="yieldAmt" type="number" min="1" value="100000" /></div>
             <div style="display:flex;align-items:flex-end"><button class="btn gold block" onclick="handleDeposit('${tokenAddr}')">Distribute Rent</button></div>
           </div>
           <div id="yieldStatus" class="status"></div>
@@ -303,152 +373,185 @@ async function renderPropertyDetail(tokenAddr){
 
         <div class="card">
           <div class="section-title">Marketplace Listings</div>
-          <div class="section-sub">Shares listed for sale. Buying is instant &mdash; the seller escrowed the shares when listing, so a buyer completes the purchase in one click from their own wallet. Payment is settled in rupees, off-chain.</div>
+          <div class="section-sub">Buying is instant: listed shares are held in escrow, so a purchase transfers them straight to your wallet. Payment is settled in rupees, off-chain &mdash; no money moves on-chain.</div>
           <table>
             <thead><tr><th>Seller</th><th>Shares</th><th>Price/Share</th><th>Status</th><th>Action</th></tr></thead>
             <tbody>${listingRows || '<tr><td colspan=5 class="empty">No listings for this property yet.</td></tr>'}</tbody>
           </table>
+          <div id="cancelStatus" class="status"></div>
         </div>
 
         <div id="buyPanelWrap"></div>
       </div>`;
   }catch(e){
-    app.innerHTML = '<div class="page container"><div class="status show err">Could not load this property: '+(e.message||e)+'</div></div>';
+    app.innerHTML = '<div class="page container"><div class="status show err">Could not load this property: '+esc(e.shortMessage||e.message||e)+'</div></div>';
   }
 }
 
+/* ---------------- write actions ---------------- */
 async function handleList(tokenAddr){
   if(!requireLogin()) return;
   try{
-    const amount = BigInt(document.getElementById('listAmt').value);
-    const price = BigInt(document.getElementById('listPrice').value);
-    const tk = contract('PropertyToken', tokenAddr);
-    setSt('listStatus','Step 1/2 \u2014 approving escrow (confirm in MetaMask)\u2026','info');
-    await (await tk.approve(CONFIG.marketplace, amount)).wait();
-    setSt('listStatus','Step 2/2 \u2014 creating listing (confirm in MetaMask)\u2026','info');
-    await (await contract('Marketplace').list(tokenAddr, amount, price)).wait();
+    const amount = BigInt(document.getElementById('listAmt').value || '0');
+    const price  = BigInt(document.getElementById('listPrice').value || '0');
+    if(amount<=0n || price<=0n) throw new Error('Invalid amount');
+    const tk = new ethers.Contract(tokenAddr, ABIS.PropertyToken, provider);
+    const allowance = await tk.allowance(session.address, CONFIG.marketplace);
+    if(allowance < amount){
+      await sendTx('listStatus','Step 1/2: approving escrow','PropertyToken',tokenAddr,'approve',[CONFIG.marketplace, amount]);
+    }
+    await sendTx('listStatus','Step 2/2: creating listing','Marketplace',null,'list',[tokenAddr, amount, price]);
     setSt('listStatus','Listed '+amount+' shares at '+rupee(price)+' each.','ok');
-    setTimeout(()=>renderPropertyDetail(tokenAddr), 900);
-  }catch(e){ setSt('listStatus', prettyErr(e), 'err'); }
+    setTimeout(()=>renderPropertyDetail(tokenAddr), 800);
+  }catch(e){ console.error('[tx] list failed', e); setSt('listStatus', prettyErr(e), 'err'); }
 }
 
 async function handleCancel(id, tokenAddr){
+  if(!requireLogin()) return;
   try{
-    await (await contract('Marketplace').cancel(id)).wait();
-    renderPropertyDetail(tokenAddr);
-  }catch(e){ alert(prettyErr(e)); }
+    await sendTx('cancelStatus','Cancelling listing','Marketplace',null,'cancel',[id]);
+    setSt('cancelStatus','Listing cancelled. Unsold shares returned to your wallet.','ok');
+    setTimeout(()=>renderPropertyDetail(tokenAddr), 800);
+  }catch(e){ console.error('[tx] cancel failed', e); setSt('cancelStatus', prettyErr(e), 'err'); }
 }
 
-/* Real-time buy — one click, one signature, no seller involvement. */
 function openBuy(listingId, remainingStr, priceStr, tokenAddr){
   const remaining = BigInt(remainingStr), price = BigInt(priceStr);
   const defaultQty = remaining < 10n ? remaining : 10n;
   const wrap = document.getElementById('buyPanelWrap');
   wrap.innerHTML = `
-    <div class="card" style="border:1.5px solid var(--clay)">
+    <div class="card" style="border:1.5px solid var(--gold)">
       <div class="section-title">Buy Shares &mdash; Listing #${listingId}</div>
-      <div class="section-sub">${remaining.toString()} shares available at ${rupee(price)} each.</div>
-      <label>Quantity (max ${remaining.toString()})</label>
-      <input id="buyQty" type="number" min="1" max="${remaining.toString()}" value="${defaultQty.toString()}"
+      <div class="section-sub">${remaining} shares available at ${rupee(price)} each.</div>
+      <label>Quantity (max ${remaining})</label>
+      <input id="buyQty" type="number" min="1" max="${remaining}" value="${defaultQty}"
              oninput="updateBuyTotal('${priceStr}')" />
-      <div class="field-note" id="buyTotal">Total: ${rupee(defaultQty*price)}  (settled in rupees, off-chain)</div>
-      <button class="btn gold block" style="margin-top:16px" id="confirmBuyBtn"
-              onclick="confirmBuy(${listingId}, '${tokenAddr}')">Confirm Purchase</button>
-      <button class="btn ghost small" style="margin-top:8px" onclick="document.getElementById('buyPanelWrap').innerHTML=''">Cancel</button>
+      <div class="field-note" id="buyTotal">Total: ${rupee(defaultQty*price)} (settled in rupees, off-chain)</div>
+      <div style="display:flex;gap:10px;margin-top:16px">
+        <button class="btn gold" onclick="confirmBuy(${listingId}, '${tokenAddr}', '${remainingStr}')">Confirm Purchase</button>
+        <button class="btn ghost" onclick="document.getElementById('buyPanelWrap').innerHTML=''">Close</button>
+      </div>
       <div id="buyStatus" class="status"></div>
     </div>`;
   wrap.scrollIntoView({behavior:'smooth', block:'center'});
 }
 function updateBuyTotal(priceStr){
-  const price = BigInt(priceStr);
   const qty = BigInt(document.getElementById('buyQty').value || '0');
-  document.getElementById('buyTotal').textContent = 'Total: ' + rupee(qty*price) + '  (settled in rupees, off-chain)';
+  document.getElementById('buyTotal').textContent =
+    'Total: ' + rupee(qty*BigInt(priceStr)) + ' (settled in rupees, off-chain)';
 }
-async function confirmBuy(listingId, tokenAddr){
+async function confirmBuy(listingId, tokenAddr, remainingStr){
   if(!requireLogin()) return;
   try{
     const qty = BigInt(document.getElementById('buyQty').value || '0');
-    if(qty<=0n){ setSt('buyStatus','Enter a quantity.','err'); return; }
-    const btn = document.getElementById('confirmBuyBtn'); if(btn) btn.disabled = true;
-    setSt('buyStatus','Confirm in MetaMask\u2026','info');
-    await (await contract('Marketplace').buy(listingId, qty)).wait();
-    setSt('buyStatus','Purchase complete \u2014 '+qty+' shares are now yours.','ok');
-    setTimeout(()=>renderPropertyDetail(tokenAddr), 1200);
-  }catch(e){
-    const btn = document.getElementById('confirmBuyBtn'); if(btn) btn.disabled = false;
-    setSt('buyStatus', prettyErr(e), 'err');
-  }
+    if(qty<=0n || qty>BigInt(remainingStr)) throw new Error('Invalid amount');
+    await sendTx('buyStatus','Buying shares','Marketplace',null,'buy',[listingId, qty]);
+    setSt('buyStatus','Done \u2014 '+qty+' shares are now in your wallet.','ok');
+    setTimeout(()=>renderPropertyDetail(tokenAddr), 1000);
+  }catch(e){ console.error('[tx] buy failed', e); setSt('buyStatus', prettyErr(e), 'err'); }
 }
 
 async function handleDeposit(tokenAddr){
+  if(!requireLogin()) return;
   try{
-    const amt = BigInt(document.getElementById('yieldAmt').value);
-    setSt('yieldStatus','Distributing (confirm in MetaMask)\u2026','info');
-    await (await contract('PropertyToken', tokenAddr).depositYield(amt)).wait();
+    const amt = BigInt(document.getElementById('yieldAmt').value || '0');
+    if(amt<=0n) throw new Error('Invalid amount');
+    await sendTx('yieldStatus','Distributing rent','PropertyToken',tokenAddr,'depositYield',[amt]);
     setSt('yieldStatus','Distributed '+rupee(amt)+' pro-rata across all shareholders.','ok');
-    setTimeout(()=>renderPropertyDetail(tokenAddr), 900);
-  }catch(e){ setSt('yieldStatus', prettyErr(e), 'err'); }
-}
-
-/* Download full on-chain ownership history as CSV, chunked for Alchemy free tier. */
-async function downloadHistory(tokenAddr, name, symbol){
-  try{
-    const CHUNK = 10;
-    const latest = await provider.getBlockNumber();
-    const factory = new ethers.Contract(CONFIG.factory, ABIS.PropertyTokenFactory, provider);
-    let startBlock = Math.max(0, latest - 4900);
-    try{
-      const filter = factory.filters.LandRegistered(null, tokenAddr);
-      for(let to = latest; to >= 0; to -= CHUNK){
-        const from = Math.max(0, to - CHUNK + 1);
-        const found = await factory.queryFilter(filter, from, to);
-        if(found.length){ startBlock = found[0].blockNumber; break; }
-        if(from === 0) break;
-      }
-    }catch{}
-    const tk = new ethers.Contract(tokenAddr, ABIS.PropertyToken, provider);
-    const transferFilter = tk.filters.Transfer();
-    let events = [];
-    for(let from = startBlock; from <= latest; from += CHUNK){
-      const to = Math.min(from + CHUNK - 1, latest);
-      const batch = await tk.queryFilter(transferFilter, from, to);
-      events = events.concat(batch);
-    }
-    const ZERO = '0x0000000000000000000000000000000000000000';
-    const csvCell = s => { s = String(s); return /[",\n]/.test(s) ? '"'+s.replace(/"/g,'""')+'"' : s; };
-    const headerRow = ['#','Type','From','To','Shares','Block','Transaction Hash'];
-    const rows = events.map((e,i)=>{
-      const isMint = e.args.from === ZERO;
-      return [ i+1, isMint?'Mint (initial issue)':'Transfer', isMint?'(newly minted)':e.args.from,
-        e.args.to, e.args.value.toString(), e.blockNumber, e.transactionHash ];
-    });
-    const meta = [
-      ['Property', name],['Token Symbol', symbol],['Token Contract', tokenAddr],
-      ['Network', CONFIG.network || 'sepolia'],['Exported', new Date().toLocaleString()],
-      ['Total Records', rows.length],[],
-    ];
-    const csv = [...meta, headerRow, ...rows].map(r => r.map(csvCell).join(',')).join('\n');
-    const blob = new Blob([csv], { type:'text/csv;charset=utf-8;' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url; a.download = `${symbol||'property'}_ownership_history.csv`;
-    document.body.appendChild(a); a.click(); document.body.removeChild(a);
-    URL.revokeObjectURL(url);
-  }catch(e){ alert('Could not export history: ' + (e.message || e)); }
+    setTimeout(()=>renderPropertyDetail(tokenAddr), 800);
+  }catch(e){ console.error('[tx] deposit failed', e); setSt('yieldStatus', prettyErr(e), 'err'); }
 }
 
 async function handleClaim(tokenAddr){
+  if(!requireLogin()) return;
   try{
-    setSt('claimStatus','Claiming (confirm in MetaMask)\u2026','info');
-    await (await contract('PropertyToken', tokenAddr).claimYield()).wait();
+    await sendTx('claimStatus','Claiming rent','PropertyToken',tokenAddr,'claimYield',[]);
     setSt('claimStatus','Claimed. (Rupee payout happens off-chain; this records the entitlement as settled.)','ok');
-    setTimeout(()=>renderPropertyDetail(tokenAddr), 1000);
-  }catch(e){ setSt('claimStatus', prettyErr(e), 'err'); }
+    setTimeout(()=>renderPropertyDetail(tokenAddr), 900);
+  }catch(e){ console.error('[tx] claim failed', e); setSt('claimStatus', prettyErr(e), 'err'); }
 }
 
-/* ================= LIST PROPERTY ================= */
+/* ================= OWNERSHIP HISTORY CSV =================
+   Alchemy's free tier only allows eth_getLogs over 10 blocks per call,
+   so: (1) find the block the token was created in (binary search on
+   getCode — ~25 cheap calls), then (2) scan Transfer logs from there to
+   the latest block in 10-block chunks, several chunks in parallel.     */
+async function findDeployBlock(addr, latest){
+  let lo = 0, hi = latest;
+  while(lo < hi){
+    const mid = Math.floor((lo+hi)/2);
+    const code = await provider.getCode(addr, mid);
+    if(code && code !== '0x') hi = mid; else lo = mid + 1;
+  }
+  return lo;
+}
+async function downloadHistory(tokenAddr, name, symbol){
+  const btn = document.getElementById('dlBtn');
+  const label = btn ? btn.innerHTML : '';
+  const prog = t => { if(btn) btn.textContent = t; };
+  try{
+    if(btn) btn.disabled = true;
+    prog('Finding creation block\u2026');
+    const latest = await provider.getBlockNumber();
+    const start = await findDeployBlock(tokenAddr, latest);
+
+    const topic = ethers.id('Transfer(address,address,uint256)');
+    const CHUNK = 10, PAR = 8;
+    const ranges = [];
+    for(let b=start; b<=latest; b+=CHUNK) ranges.push([b, Math.min(b+CHUNK-1, latest)]);
+
+    const iface = new ethers.Interface(ABIS.PropertyToken);
+    const logs = [];
+    for(let i=0; i<ranges.length; i+=PAR){
+      prog('Reading chain\u2026 '+Math.min(100, Math.round(i*100/ranges.length))+'%');
+      const batch = ranges.slice(i, i+PAR).map(([f,t])=>
+        provider.getLogs({ address: tokenAddr, topics:[topic], fromBlock:f, toBlock:t }));
+      for(const r of await Promise.all(batch)) logs.push(...r);
+    }
+    logs.sort((a,b)=> a.blockNumber-b.blockNumber || a.index-b.index);
+
+    const ZERO = ethers.ZeroAddress;
+    const csvCell = s => { s = String(s); return /[",\n]/.test(s) ? '"'+s.replace(/"/g,'""')+'"' : s; };
+    const tag = a => a.toLowerCase()===CONFIG.marketplace.toLowerCase() ? a+' (Marketplace escrow)' : a;
+    const rows = logs.map((lg,i)=>{
+      const p = iface.parseLog(lg);
+      const from = p.args[0], to = p.args[1], value = p.args[2];
+      const isMint = from === ZERO;
+      return [ i+1, isMint ? 'Mint (initial issue)' : 'Transfer',
+        isMint ? '(newly minted)' : tag(from), tag(to), value.toString(), lg.blockNumber, lg.transactionHash ];
+    });
+    const meta = [
+      ['Property', name], ['Token Symbol', symbol], ['Token Contract', tokenAddr],
+      ['Network', CONFIG.network || 'sepolia'], ['Exported', new Date().toLocaleString()],
+      ['Total Records', rows.length], [],
+    ];
+    const header = ['#','Type','From','To','Shares','Block','Transaction Hash'];
+    const csv = [...meta, header, ...rows].map(r => r.map(csvCell).join(',')).join('\n');
+
+    const url = URL.createObjectURL(new Blob([csv], { type:'text/csv;charset=utf-8;' }));
+    const a = document.createElement('a');
+    a.href = url; a.download = `${symbol||'property'}_ownership_history.csv`;
+    document.body.appendChild(a); a.click(); a.remove();
+    URL.revokeObjectURL(url);
+  }catch(e){
+    console.error('[history] failed', e);
+    alert('Could not export history: ' + (e.shortMessage || e.message || e));
+  }finally{
+    if(btn){ btn.disabled = false; btn.innerHTML = label; }
+  }
+}
+
+/* ================= LIST PROPERTY (register) ================= */
 function renderListProperty(){
-  if(!requireLogin()) return;
+  if(!session){
+    document.getElementById('app').innerHTML = `
+      <div class="page container" style="max-width:640px">
+        <div class="page-head"><span class="kicker">Register</span><h1>List a New Property</h1>
+          <p>Connect your wallet to register a property.</p></div>
+        <button class="btn" onclick="connectWallet(false)">Connect Wallet</button>
+      </div>`;
+    return;
+  }
   document.getElementById('app').innerHTML = `
     <div class="page container" style="max-width:640px">
       <div class="page-head">
@@ -459,80 +562,94 @@ function renderListProperty(){
       <div class="card">
         <label>Property name</label><input id="pName" value="Puravankara, Tower A" />
         <label>Symbol</label><input id="pSymbol" value="PRVK-A" />
-        <label>Total shares</label><input id="pShares" type="number" value="1000" />
+        <label>Total shares</label><input id="pShares" type="number" min="1" value="1000" />
         <div class="field-note">Whole-number shares. Owning 50 of 1000 = 5% of the property.</div>
         <label>Document reference</label><input id="pDoc" value="Title deed and khata extract" />
         <div class="field-note">Hashed on-chain (keccak256) so the record is tamper-evident.</div>
-        <button class="btn block" style="margin-top:20px" onclick="handleRegister()">Register Property</button>
+        <button id="regBtn" class="btn block" style="margin-top:20px" onclick="handleRegister()">Register Property</button>
         <div id="regStatus" class="status"></div>
       </div>
     </div>`;
 }
 async function handleRegister(){
+  if(!requireLogin()) return;
+  const btn = document.getElementById('regBtn');
   try{
+    if(btn) btn.disabled = true;
     const name = document.getElementById('pName').value.trim();
     const symbol = document.getElementById('pSymbol').value.trim();
-    const shares = BigInt(document.getElementById('pShares').value);
+    const shares = BigInt(document.getElementById('pShares').value || '0');
+    if(!name || !symbol || shares<=0n) throw new Error('Fill in a name, symbol and a share count above 0.');
     const docHash = ethers.keccak256(ethers.toUtf8Bytes(document.getElementById('pDoc').value));
-    setSt('regStatus','Registering on-chain (confirm in MetaMask)\u2026','info');
-    const factory = contract('PropertyTokenFactory');
-    const rc = await (await factory.registerLand(name, symbol, shares, docHash, 'demo')).wait();
-    let tokenAddr;
-    for(const log of rc.logs){ try{ const p=factory.interface.parseLog(log); if(p&&p.name==='LandRegistered') tokenAddr=p.args.tokenAddress; }catch{} }
-    setSt('regStatus','Registered! Redirecting to your property\u2026','ok');
-    setTimeout(()=>location.hash = '#/properties/'+tokenAddr, 900);
-  }catch(e){ setSt('regStatus', prettyErr(e), 'err'); }
+
+    const rc = await sendTx('regStatus','Registering property','PropertyTokenFactory',null,'registerLand',
+      [name, symbol, shares, docHash, 'demo']);
+
+    const iface = new ethers.Interface(ABIS.PropertyTokenFactory);
+    let tokenAddr = null;
+    for(const log of rc.logs){
+      try{ const p = iface.parseLog(log); if(p && p.name==='LandRegistered') tokenAddr = p.args.tokenAddress; }catch{}
+    }
+    setSt('regStatus','Registered! Opening your property\u2026','ok');
+    setTimeout(()=>{ location.hash = tokenAddr ? '#/properties/'+tokenAddr : '#/properties'; }, 900);
+  }catch(e){
+    console.error('[tx] register failed', e);
+    setSt('regStatus', prettyErr(e), 'err');
+  }finally{
+    if(btn) btn.disabled = false;
+  }
 }
 
 /* ================= DASHBOARD ================= */
 async function renderDashboard(){
-  if(!requireLogin()) return;
   const app = document.getElementById('app');
+  if(!session){
+    app.innerHTML = `<div class="page container"><div class="page-head"><span class="kicker">Dashboard</span>
+      <h1>Your Dashboard</h1><p>Connect your wallet to see your holdings.</p></div>
+      <button class="btn" onclick="connectWallet(false)">Connect Wallet</button></div>`;
+    return;
+  }
   app.innerHTML = '<div class="page container"><div class="loading">Loading your dashboard\u2026</div></div>';
   try{
-    const factory = contract('PropertyTokenFactory');
-    const all = await factory.getAllTokens();
     const me = session.address;
+    const all = await withTimeout(readContract('PropertyTokenFactory').getAllTokens(), 15000, 'Timed out reaching Sepolia.');
 
-    let totalProps=0, totalPending=0n, holdingRows='', listingRows='';
-    for(const t of all){
+    const holdings = await Promise.all(all.map(async t=>{
       const tk = new ethers.Contract(t, ABIS.PropertyToken, provider);
       const bal = await tk.balanceOf(me);
-      if(bal>0n){
-        totalProps++;
-        let name='Property', supply=0n, pending=0n;
-        try{ name=await tk.name(); supply=await tk.totalSupply(); pending=await tk.pendingYield(me); }catch{}
-        totalPending += pending;
-        const pct = supply>0n ? (Number(bal)*100/Number(supply)).toFixed(1) : '0';
-        holdingRows += `<tr>
-          <td><a href="#/properties/${t}" style="color:var(--blue);font-weight:600">${name}</a></td>
-          <td>${bal.toString()}</td><td>${pct}%</td><td class="rupee">${rupee(pending)}</td>
-        </tr>`;
-      }
+      if(bal===0n) return null;
+      const [name, supply, pending] = await Promise.all([tk.name(), tk.totalSupply(), tk.pendingYield(me)]);
+      return { t, name, supply, pending, bal };
+    }));
+    let totalProps=0, totalPending=0n, holdingRows='';
+    for(const h of holdings){
+      if(!h) continue;
+      totalProps++; totalPending += h.pending;
+      const pct = h.supply>0n ? (Number(h.bal)*100/Number(h.supply)).toFixed(1) : '0';
+      holdingRows += `<tr>
+        <td><a href="#/properties/${h.t}" style="color:var(--blue);font-weight:600">${esc(h.name)}</a></td>
+        <td>${h.bal}</td><td>${pct}%</td><td class="rupee">${rupee(h.pending)}</td></tr>`;
     }
 
-    const market = contract('Marketplace');
+    const market = readContract('Marketplace');
     const n = Number(await market.nextListingId());
-    let myActiveListings = 0;
-    for(let i=0;i<n;i++){
-      const l = await market.listings(i);
-      if(l[0].toLowerCase()!==me.toLowerCase()) continue;
-      if(!l[4]) continue;
+    const listings = await Promise.all(Array.from({length:n}, (_,i)=>market.listings(i)));
+    let myActiveListings = 0, listingRows = '';
+    for(const l of listings){
+      if(l[0].toLowerCase()!==me.toLowerCase() || !l[4]) continue;
       myActiveListings++;
-      const tk = new ethers.Contract(l[1], ABIS.PropertyToken, provider);
-      let name='Property'; try{ name = await tk.name(); }catch{}
+      let name='Property'; try{ name = await new ethers.Contract(l[1], ABIS.PropertyToken, provider).name(); }catch{}
       listingRows += `<tr>
-        <td><a href="#/properties/${l[1]}" style="color:var(--blue);font-weight:600">${name}</a></td>
-        <td>${l[2].toString()}</td><td class="rupee">${rupee(l[3])}</td>
-        <td><a href="#/properties/${l[1]}" style="color:var(--blue);font-size:12.5px;font-weight:600">Manage &rarr;</a></td>
-      </tr>`;
+        <td><a href="#/properties/${l[1]}" style="color:var(--blue);font-weight:600">${esc(name)}</a></td>
+        <td>${l[2]}</td><td class="rupee">${rupee(l[3])}</td>
+        <td><a href="#/properties/${l[1]}" style="color:var(--blue);font-size:12.5px;font-weight:600">Manage &rarr;</a></td></tr>`;
     }
 
     app.innerHTML = `
       <div class="page container">
         <div class="page-head">
           <span class="kicker">Dashboard</span>
-          <h1>Welcome back, ${session.name}</h1>
+          <h1>Welcome back, ${esc(session.name)}</h1>
           <p>${session.role} &middot; ${short(session.address)}</p>
         </div>
         <div class="grid-3" style="margin-bottom:24px">
@@ -550,7 +667,7 @@ async function renderDashboard(){
         </div>
         <div class="card">
           <div class="section-title">Your Active Listings</div>
-          <div class="section-sub">Shares you currently have for sale.</div>
+          <div class="section-sub">Shares you currently have for sale (held in escrow).</div>
           <table>
             <thead><tr><th>Property</th><th>Shares Left</th><th>Price/Share</th><th></th></tr></thead>
             <tbody>${listingRows || '<tr><td colspan=4 class="empty">No active listings.</td></tr>'}</tbody>
@@ -558,23 +675,27 @@ async function renderDashboard(){
         </div>
       </div>`;
   }catch(e){
-    app.innerHTML = '<div class="page container"><div class="status show err">Could not load dashboard: '+(e.message||e)+'</div></div>';
+    app.innerHTML = '<div class="page container"><div class="status show err">Could not load dashboard: '+esc(e.shortMessage||e.message||e)+'</div></div>';
   }
 }
 
-/* ---------------- helpers ---------------- */
-function setSt(id,msg,kind){ const el=document.getElementById(id); if(!el)return; el.textContent=msg; el.className='status show '+kind; }
+/* ---------------- shared helpers ---------------- */
+function setSt(id,msg,kind){ const el=document.getElementById(id); if(!el) return; el.textContent=msg; el.className='status show '+kind; }
 function prettyErr(e){
-  const m = e.reason || e.shortMessage || e.message || String(e);
-  if(m.includes('KYC')) return 'This account is not verified for trading.';
+  const m = String(e && (e.reason || (e.info && e.info.error && e.info.error.message) || e.shortMessage || e.message) || e);
+  if(/KYC/i.test(m)) return 'This wallet is not KYC-approved on the current contracts. After a redeploy, run scripts/approve-wallets.js again.';
   if(m.includes('Only property owner')) return 'Only the property owner can distribute rent.';
-  if(m.includes('Seller cannot buy')) return 'You can\u2019t buy your own listing.';
+  if(m.includes('Seller cannot buy')) return 'You cannot buy your own listing. Use Cancel instead.';
   if(m.includes('Not seller')) return 'Only the seller can cancel this listing.';
   if(m.includes('Nothing to claim')) return 'Nothing to claim yet.';
-  if(m.includes('Invalid amount')) return 'That quantity isn\u2019t available.';
-  if(m.includes('is not a function')) return 'App/contract mismatch \u2014 recopy abis.json from your latest deploy.';
-  if(m.includes('could not detect network')||m.includes('failed to detect')) return 'Cannot reach the network. Check your connection and that MetaMask is on Sepolia.';
-  return m.length>140 ? m.slice(0,140)+'\u2026' : m;
+  if(m.includes('Listing not active')) return 'This listing is no longer active. Refresh the page.';
+  if(m.includes('Invalid amount') || m.includes('must be > 0')) return 'Enter a valid quantity.';
+  if(/insufficient funds/i.test(m)) return 'Not enough Sepolia test ETH for gas. Top up from a Sepolia faucet (free) and try again.';
+  if((e && (e.code === 4001 || e.code === 'ACTION_REJECTED')) || /user (rejected|denied)/i.test(m)) return 'You rejected the request in MetaMask.';
+  if(e && e.code === -32002) return 'A MetaMask request is already open. Click the MetaMask icon to finish it.';
+  if(m.includes('is not a function') || m.includes('no matching fragment')) return 'The ABI is out of date. Re-copy frontend-config/abis.json into frontend/ and hard-refresh.';
+  if(/could not detect network|failed to detect|network error|Failed to fetch/i.test(m)) return 'Cannot reach Sepolia. Check your connection and the rpc URL in addresses.json.';
+  return m.length>180 ? m.slice(0,180)+'\u2026' : m;
 }
 
 boot();
