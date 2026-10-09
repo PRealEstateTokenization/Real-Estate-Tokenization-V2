@@ -670,7 +670,10 @@ async function renderDashboard(){
       const pct = h.supply>0n ? (Number(h.bal)*100/Number(h.supply)).toFixed(1) : '0';
       holdingRows += `<tr>
         <td><a href="#/properties/${h.t}" style="color:var(--blue);font-weight:600">${esc(h.name)}</a></td>
-        <td>${h.bal}</td><td>${pct}%</td><td class="rupee">${rupee(h.pending)}</td></tr>`;
+        <td>${h.bal}</td><td>${pct}%</td><td class="rupee">${rupee(h.pending)}</td>
+        <td>${h.pending>0n
+          ? `<button class="btn small gold" onclick="handleClaimDash('${h.t}')">Claim Rent</button>`
+          : '<span style="color:var(--muted);font-size:12.5px">Nothing to claim</span>'}</td></tr>`;
     }
 
     const market = readContract('Marketplace');
@@ -703,9 +706,10 @@ async function renderDashboard(){
           <div class="section-title">Your Holdings</div>
           <div class="section-sub">Properties you own shares in.</div>
           <table>
-            <thead><tr><th>Property</th><th>Shares</th><th>Ownership</th><th>Claimable Rent</th></tr></thead>
-            <tbody>${holdingRows || '<tr><td colspan=4 class="empty">No holdings yet. <a href="#/properties" style="color:var(--blue);font-weight:600">Browse properties</a> or <a href="#/list-property" style="color:var(--blue);font-weight:600">register one</a>.</td></tr>'}</tbody>
+            <thead><tr><th>Property</th><th>Shares</th><th>Ownership</th><th>Claimable Rent</th><th>Action</th></tr></thead>
+            <tbody>${holdingRows || '<tr><td colspan=5 class="empty">No holdings yet. <a href="#/properties" style="color:var(--blue);font-weight:600">Browse properties</a> or <a href="#/list-property" style="color:var(--blue);font-weight:600">register one</a>.</td></tr>'}</tbody>
           </table>
+          <div id="dashClaimStatus" class="status"></div>
         </div>
         <div class="card">
           <div class="section-title">Your Active Listings</div>
