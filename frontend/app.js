@@ -472,99 +472,103 @@ async function handleClaim(tokenAddr){
 }
 
 /* ================= OWNERSHIP HISTORY CSV =================
-   Uses its own provider with JSON-RPC batching turned OFF — batched
-   eth_getLogs calls are what produce "could not coalesce error".
-   Tries the whole range in one call first, then falls back to chunks
-   with retries and limited concurrency.                              */
-let scanProvider = null;
-function getScanProvider(){
-  if(!scanProvider){
-    scanProvider = new ethers.JsonRpcProvider(CONFIG.rpc, 11155111,
-      { staticNetwork:true, batchMaxCount:1, batchStallTime:0 });
-  }
-  return scanProvider;
-}
+   One Alchemy request (alchemy_getAssetTransfers) returns every transfer
+   for this token, so there is no block-by-block scanning. If the RPC does
+   not support it, falls back to a short eth_getLogs scan.               */
 function sleep(ms){ return new Promise(r=>setTimeout(r, ms)); }
-async function rpcRetry(fn, tries){
-  tries = tries || 4;
-  let wait = 400, last;
-  for(let i=0;i<tries;i++){
-    try{ return await fn(); }
-    catch(e){ last = e; if(i < tries-1){ await sleep(wait); wait *= 2; } }
+
+async function rpc(method, params){
+  const res = await fetch(CONFIG.rpc, {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ jsonrpc:'2.0', id:1, method, params })
+  });
+  const json = await res.json();
+  if(json.error) throw new Error(json.error.message || 'RPC error');
+  return json.result;
+}
+
+/* Every ERC-20 transfer of this token, oldest first. Mints included. */
+async function fetchTransfers(tokenAddr, prog){
+  const out = [];
+  let pageKey, page = 0;
+  do{
+    const req = {
+      fromBlock:'0x0', toBlock:'latest', contractAddresses:[tokenAddr],
+      category:['erc20'], excludeZeroValue:false, withMetadata:true,
+      order:'asc', maxCount:'0x3e8'
+    };
+    if(pageKey) req.pageKey = pageKey;
+    const r = await rpc('alchemy_getAssetTransfers', [req]);
+    out.push(...(r.transfers || []));
+    pageKey = r.pageKey;
+    if(pageKey) prog('Reading chain\u2026 page ' + (++page + 1));
+  } while(pageKey && out.length < 20000);
+  return out.map(t => ({
+    from: t.from, to: t.to,
+    value: BigInt(t.rawContract && t.rawContract.value ? t.rawContract.value : '0x0'),
+    block: parseInt(t.blockNum, 16),
+    hash: t.hash,
+    time: t.metadata && t.metadata.blockTimestamp ? t.metadata.blockTimestamp : ''
+  }));
+}
+
+/* Fallback for a non-Alchemy RPC: scan recent blocks only. */
+async function fetchTransfersByLogs(tokenAddr, prog){
+  const pv = new ethers.JsonRpcProvider(CONFIG.rpc, 11155111,
+    { staticNetwork:true, batchMaxCount:1, batchStallTime:0 });
+  const topic = ethers.id('Transfer(address,address,uint256)');
+  const latest = await pv.getBlockNumber();
+  const SPAN = 10, LOOKBACK = 50000;
+  const start = Math.max(0, latest - LOOKBACK);
+  const ranges = [];
+  for(let b=start; b<=latest; b+=SPAN) ranges.push([b, Math.min(b+SPAN-1, latest)]);
+  const iface = new ethers.Interface(ABIS.PropertyToken);
+  const rows = [];
+  for(let i=0;i<ranges.length;i+=4){
+    prog('Reading chain\u2026 ' + Math.min(99, Math.round(i*100/ranges.length)) + '%');
+    const batch = ranges.slice(i, i+4).map(([f,t])=>
+      pv.getLogs({ address:tokenAddr, topics:[topic], fromBlock:f, toBlock:t }).catch(()=>[]));
+    for(const logs of await Promise.all(batch))
+      for(const lg of logs){
+        const p = iface.parseLog(lg);
+        rows.push({ from:p.args[0], to:p.args[1], value:p.args[2], block:lg.blockNumber, hash:lg.transactionHash, time:'' });
+      }
+    await sleep(50);
   }
-  throw last;
+  return rows.sort((a,b)=>a.block-b.block);
 }
-/* Parse a provider's "max N block range" hint out of its error text. */
-function spanFromError(e){
-  const m = String((e && (e.shortMessage || e.message)) || e);
-  const hit = m.match(/(\d[\d,]*)\s*block\s*range/i) || m.match(/range.*?(\d[\d,]*)\s*blocks/i);
-  if(hit){ const n = parseInt(hit[1].replace(/,/g,''), 10); if(n > 0) return Math.min(n, 2000); }
-  return 10;
-}
-async function findDeployBlock(addr, latest){
-  const pv = getScanProvider();
-  let lo = 0, hi = latest;
-  while(lo < hi){
-    const mid = Math.floor((lo+hi)/2);
-    const code = await rpcRetry(()=>pv.getCode(addr, mid));
-    if(code && code !== '0x') hi = mid; else lo = mid + 1;
-  }
-  return lo;
-}
+
 async function downloadHistory(tokenAddr, name, symbol){
   const btn = document.getElementById('dlBtn');
   const label = btn ? btn.innerHTML : '';
   const prog = t => { if(btn) btn.textContent = t; };
-  const pv = getScanProvider();
-  const topic = ethers.id('Transfer(address,address,uint256)');
-  let missing = 0;
   try{
     if(btn) btn.disabled = true;
-    prog('Finding creation block\u2026');
-    const latest = await rpcRetry(()=>pv.getBlockNumber());
-    const start  = await findDeployBlock(tokenAddr, latest);
-
-    let logs = null, span = 10;
     prog('Reading chain\u2026');
-    try{   // most RPCs allow the full range; try it once
-      logs = await pv.getLogs({ address:tokenAddr, topics:[topic], fromBlock:start, toBlock:latest });
-    }catch(e){ span = spanFromError(e); logs = null; }
-
-    if(!logs){
-      const ranges = [];
-      for(let b=start; b<=latest; b+=span) ranges.push([b, Math.min(b+span-1, latest)]);
-      logs = [];
-      const PAR = 3;                       // low concurrency: stays under rate limits
-      for(let i=0;i<ranges.length;i+=PAR){
-        prog('Reading chain\u2026 ' + Math.min(99, Math.round(i*100/ranges.length)) + '%');
-        const batch = ranges.slice(i, i+PAR).map(([f,t])=>
-          rpcRetry(()=>pv.getLogs({ address:tokenAddr, topics:[topic], fromBlock:f, toBlock:t }))
-            .catch(()=>{ missing++; return []; }));   // skip a dead chunk, don't abort
-        for(const r of await Promise.all(batch)) logs.push(...r);
-        await sleep(60);
-      }
+    let rows;
+    try{ rows = await fetchTransfers(tokenAddr, prog); }
+    catch(e){
+      console.warn('[history] asset-transfers unavailable, falling back to log scan', e);
+      rows = await fetchTransfersByLogs(tokenAddr, prog);
     }
-    logs.sort((a,b)=> a.blockNumber-b.blockNumber || a.index-b.index);
+    prog('Building CSV\u2026');
 
     const ZERO = ethers.ZeroAddress;
     const csvCell = s => { s = String(s); return /[",\n]/.test(s) ? '"'+s.replace(/"/g,'""')+'"' : s; };
-    const tag = a => a.toLowerCase()===CONFIG.marketplace.toLowerCase() ? a+' (Marketplace escrow)' : a;
-    const iface = new ethers.Interface(ABIS.PropertyToken);
-    const rows = logs.map((lg,i)=>{
-      const p = iface.parseLog(lg);
-      const from = p.args[0], to = p.args[1], value = p.args[2];
-      const isMint = from === ZERO;
+    const tag = a => a && a.toLowerCase()===CONFIG.marketplace.toLowerCase() ? a+' (Marketplace escrow)' : a;
+    const body = rows.map((t,i)=>{
+      const isMint = t.from && t.from.toLowerCase() === ZERO.toLowerCase();
       return [ i+1, isMint ? 'Mint (initial issue)' : 'Transfer',
-        isMint ? '(newly minted)' : tag(from), tag(to), value.toString(), lg.blockNumber, lg.transactionHash ];
+        isMint ? '(newly minted)' : tag(t.from), tag(t.to),
+        t.value.toString(), t.block, t.time, t.hash ];
     });
     const meta = [
       ['Property', name], ['Token Symbol', symbol], ['Token Contract', tokenAddr],
       ['Network', CONFIG.network || 'sepolia'], ['Exported', new Date().toLocaleString()],
-      ['Total Records', rows.length], [],
+      ['Total Records', body.length], [],
     ];
-    if(missing) meta.splice(6, 0, ['Note', missing+' block range(s) could not be read and may be missing']);
-    const header = ['#','Type','From','To','Shares','Block','Transaction Hash'];
-    const csv = [...meta, header, ...rows].map(r => r.map(csvCell).join(',')).join('\n');
+    const header = ['#','Type','From','To','Shares','Block','Timestamp (UTC)','Transaction Hash'];
+    const csv = [...meta, header, ...body].map(r => r.map(csvCell).join(',')).join('\n');
 
     const url = URL.createObjectURL(new Blob([csv], { type:'text/csv;charset=utf-8;' }));
     const a = document.createElement('a');
@@ -573,8 +577,7 @@ async function downloadHistory(tokenAddr, name, symbol){
     URL.revokeObjectURL(url);
   }catch(e){
     console.error('[history] failed', e);
-    alert('Could not export history: ' + (e.shortMessage || e.message || e) +
-          '\n\nIf this keeps happening, wait a few seconds and try again \u2014 the RPC provider is rate-limiting the request.');
+    alert('Could not export history: ' + (e.shortMessage || e.message || e));
   }finally{
     if(btn){ btn.disabled = false; btn.innerHTML = label; }
   }
