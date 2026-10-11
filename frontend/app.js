@@ -33,8 +33,8 @@ const NAMES = {
 const SEPOLIA_CHAIN_ID = "0xaa36a7"; // 11155111
 
 /* ---------------- Supabase (property photos) ---------------- */
-const SUPABASE_URL      = 'https://aeqgvrjppxzjhoxuploh.supabase.co/rest/v1/';
-const SUPABASE_ANON_KEY = 'sb_publishable_BdE-SjAqpq81wSuViL1C9g_q9fYAUqI';
+const SUPABASE_URL      = 'https://YOUR-PROJECT.supabase.co';
+const SUPABASE_ANON_KEY = 'YOUR-ANON-KEY';
 const BUCKET = 'property-images';
 const sb = (window.supabase && SUPABASE_URL.startsWith('https') && !SUPABASE_URL.includes('YOUR-PROJECT'))
   ? window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY) : null;
@@ -211,49 +211,97 @@ function renderNav(){
     </div>`;
 }
 
+/* ================= SHARED UI PIECES ================= */
+const PROPERTY_TYPES = ['Commercial office','Retail','Warehousing','Residential','Mixed use'];
+
+/* Illustrated placeholder shown until a property has photos.
+   A simple facade drawing, tinted per property so cards differ. */
+function placeholderImg(seed){
+  const r = seededRand(String(seed||'parcel').toLowerCase());
+  const skies = [['#CFE0E8','#EEF4F6'],['#D9E4DC','#F1F5F2'],['#E6DED2','#F6F2EC'],['#D6DCE8','#F0F2F7']];
+  const bodies = ['#1E4A3D','#2B3A4A','#5B4636','#3E5A50'];
+  const sky = skies[Math.floor(r()*skies.length)], body = bodies[Math.floor(r()*bodies.length)];
+  const floors = 5 + Math.floor(r()*4), cols = 4 + Math.floor(r()*3);
+  const bw = 300, bx = (800-bw)/2, fh = 34, bh = floors*fh + 30, by = 450 - bh;
+  let win = '';
+  for(let f=0; f<floors; f++) for(let c=0; c<cols; c++){
+    const lit = r() > 0.55;
+    const ww = (bw-40)/cols - 10;
+    win += `<rect x="${(bx+20+c*((bw-40)/cols)+5).toFixed(1)}" y="${by+20+f*fh}" width="${ww.toFixed(1)}" height="${fh-14}" rx="2" fill="${lit?'#F3D9A6':'#ffffff'}" opacity="${lit?0.95:0.18}"/>`;
+  }
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 500" preserveAspectRatio="xMidYMid slice">
+    <defs><linearGradient id="s" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="${sky[0]}"/><stop offset="1" stop-color="${sky[1]}"/></linearGradient></defs>
+    <rect width="800" height="500" fill="url(#s)"/>
+    <rect x="${bx-150}" y="${by+70}" width="120" height="${bh-70}" fill="${body}" opacity="0.25"/>
+    <rect x="${bx+bw+40}" y="${by+40}" width="140" height="${bh-40}" fill="${body}" opacity="0.18"/>
+    <rect x="${bx}" y="${by}" width="${bw}" height="${bh}" rx="4" fill="${body}"/>
+    ${win}
+    <rect x="${bx+bw/2-28}" y="${450-42}" width="56" height="42" fill="#F3D9A6" opacity="0.9"/>
+    <rect x="0" y="450" width="800" height="50" fill="#C9CFC8"/>
+  </svg>`;
+  return 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
+}
+function bgStyle(url){ return `background-image:url(&quot;${url}&quot;)`; }
+
+/* Read every marketplace listing once; group active offers by token. */
+async function loadOffers(){
+  const market = readContract('Marketplace');
+  const n = Number(await market.nextListingId());
+  const all = await Promise.all(Array.from({length:n}, (_,i)=>market.listings(i)));
+  return all.map((l,i)=>({ id:i, seller:l[0], token:l[1], remaining:l[2], price:l[3], active:l[4] }));
+}
+
 /* ================= HOME ================= */
 function renderHome(){
   document.getElementById('app').innerHTML = `
     <section class="hero">
-      <div class="container">
-        <span class="kicker">Real estate for every Indian</span>
-        <h1>Buy a unit. Earn the rent. Trade anytime.</h1>
-        <p>Parcel.io divides rent-yielding properties into small units. The blockchain records exactly who
-           holds which units and splits rental income pro-rata &mdash; no cryptocurrency required. Payment
-           and rent are handled in rupees, off-chain.</p>
-        <div class="hero-actions">
-          <button class="btn gold" onclick="location.hash='#/properties'">Browse Properties</button>
-          ${session?'':'<button class="btn ghost" onclick="connectWallet(false)">Connect Wallet</button>'}
+      <div class="container hero-grid">
+        <div class="hero-copy">
+          <h1>Real estate for every Indian.</h1>
+          <p>Buy units in rent-yielding buildings, earn your share of the rent every quarter, and sell whenever you want.
+             Every unit you hold is recorded on a public ledger; you pay and get paid in rupees.</p>
+          <div class="hero-actions">
+            <a class="btn primary" href="#/properties">Browse properties</a>
+            ${session?'':'<button class="btn ghost" onclick="connectWallet(false)">Connect wallet</button>'}
+          </div>
         </div>
+        <ol class="hero-steps">
+          <li><b>Pick a building</b><span>See photos, documents and how it has performed.</span></li>
+          <li><b>Buy units</b><span>Start small. Confirm once and the units are yours.</span></li>
+          <li><b>Earn the rent</b><span>Income is split by units held. Claim it from your dashboard.</span></li>
+        </ol>
       </div>
     </section>
-    <section class="feature-strip">
-      <div class="container grid-3">
-        <div class="feature"><div class="num">01</div><h3>Verified Records</h3>
-          <p>Every unit is recorded on an immutable, independently verifiable ledger.</p></div>
-        <div class="feature"><div class="num">02</div><h3>No Cryptocurrency</h3>
-          <p>The chain records unit holdings only. Payment and rent are rupees, off-chain, always.</p></div>
-        <div class="feature"><div class="num">03</div><h3>Pro-Rata Rent</h3>
-          <p>Rental income is split automatically in proportion to the units each investor holds.</p></div>
+    <section class="container section">
+      <div class="section-head">
+        <h2>Featured properties</h2>
+        <a class="link" href="#/properties">See all properties</a>
       </div>
-    </section>
-    <div class="container" style="padding:50px 0">
-      <div class="page-head"><h1>Featured Properties</h1><p>Rent-yielding properties currently on the platform.</p></div>
-      <div id="homeProps" class="grid-3"><div class="loading">Loading properties\u2026</div></div>
-    </div>`;
+      <div id="homeProps" class="pgrid"><div class="loading">Loading properties\u2026</div></div>
+    </section>`;
   loadPropertyCards('homeProps', 3);
 }
 
-/* ================= PROPERTIES ================= */
+/* ================= PROPERTIES (browse) ================= */
+let BROWSE = [];
 function renderProperties(){
   document.getElementById('app').innerHTML = `
     <div class="page container">
-      <div class="page-head">
-        <span class="kicker">Marketplace</span>
-        <h1>All Properties</h1>
-        <p>Every property tokenised on the platform. Click one to view units, listings, documents and rent.</p>
+      <div class="browse-head">
+        <div>
+          <h1>Properties</h1>
+          <p class="lede">Rent-yielding buildings you can own a part of. Prices are per unit, paid in rupees.</p>
+        </div>
+        <div class="browse-tools">
+          <input id="q" class="search" type="search" placeholder="Search by name or location" oninput="drawBrowse()" />
+          <select id="sort" onchange="drawBrowse()" aria-label="Sort properties">
+            <option value="new">Newest first</option>
+            <option value="price">Lowest price per unit</option>
+            <option value="avail">Most units for sale</option>
+          </select>
+        </div>
       </div>
-      <div id="allProps" class="grid-3"><div class="loading">Loading properties\u2026</div></div>
+      <div id="allProps" class="pgrid"><div class="loading">Loading properties\u2026</div></div>
     </div>`;
   loadPropertyCards('allProps', null);
 }
@@ -263,41 +311,60 @@ async function loadPropertyCards(targetId, limit){
   try{
     let all = await withTimeout(readContract('PropertyTokenFactory').getAllTokens(), 15000,
       'Timed out reaching Sepolia. Check the rpc URL in addresses.json.');
-    all = [...all].reverse();               // newest first
-    if(limit) all = all.slice(0, limit);
+    all = [...all].reverse();
     if(!el) return;
     if(all.length===0){
-      el.innerHTML = '<div class="empty">No properties registered yet. Be the first to <a href="#/list-property" style="color:var(--blue);font-weight:600">list one</a>.</div>';
+      el.innerHTML = '<div class="empty">No properties yet. <a class="link" href="#/list-property">List the first one</a>.</div>';
       return;
     }
-    const media = await getAllMedia().catch(()=>({}));
-    const cards = await Promise.all(all.map(async t=>{
+    const [media, offers] = await Promise.all([ getAllMedia().catch(()=>({})), loadOffers().catch(()=>[]) ]);
+    const items = await Promise.all(all.map(async (t, order)=>{
       const tk = new ethers.Contract(t, ABIS.PropertyToken, provider);
       let name='Property', supply=0n, symbol='';
       try{ [name, supply, symbol] = await Promise.all([tk.name(), tk.totalSupply(), tk.symbol()]); }catch{}
-      const img = (media[t.toLowerCase()] || [])[0];
-      const thumb = img
-        ? `<div class="thumb has-photo" style="background-image:linear-gradient(180deg,rgba(0,0,0,0) 45%,rgba(0,0,0,.55)),url('${esc(img)}')">${esc(symbol||'PARCEL')}</div>`
-        : `<div class="thumb">${esc(symbol||'PARCEL')}</div>`;
-      return `<div class="prop-card" onclick="location.hash='#/properties/${t}'">
-        ${thumb}
-        <div class="body">
-          <h3>${esc(name)}</h3>
-          <div class="meta">${short(t)}</div>
-          <div class="prop-stats">
-            <div><span>Total Units</span><b>${supply.toString()}</b></div>
-            <div><span>Token</span><b>${esc(symbol)}</b></div>
-          </div>
-        </div>
-      </div>`;
+      const m = media[t.toLowerCase()] || {};
+      const open = offers.filter(o=>o.active && o.token.toLowerCase()===t.toLowerCase());
+      const minPrice = open.length ? open.reduce((a,o)=>o.price<a?o.price:a, open[0].price) : null;
+      const avail = open.reduce((a,o)=>a+o.remaining, 0n);
+      return { t, order, name, supply, symbol, img:(m.image_urls||[])[0], location:m.location||'', type:m.property_type||'', minPrice, avail };
     }));
-    el.innerHTML = cards.join('');
+    if(targetId==='allProps'){ BROWSE = items; drawBrowse(); }
+    else el.innerHTML = items.slice(0, limit||items.length).map(cardHTML).join('');
   }catch(e){
-    if(el) el.innerHTML = '<div class="empty" style="color:#b3261e">Could not load properties: '+esc(e.shortMessage||e.message||e)+'</div>';
+    if(el) el.innerHTML = '<div class="empty err-text">Could not load properties: '+esc(e.shortMessage||e.message||e)+'</div>';
   }
 }
+function drawBrowse(){
+  const el = document.getElementById('allProps'); if(!el) return;
+  const q = ((document.getElementById('q')||{}).value||'').trim().toLowerCase();
+  const sort = (document.getElementById('sort')||{}).value || 'new';
+  let list = BROWSE.filter(p => !q || (p.name+' '+p.location+' '+p.type+' '+p.symbol).toLowerCase().includes(q));
+  if(sort==='price') list.sort((a,b)=> (a.minPrice===null) - (b.minPrice===null) || (a.minPrice!==null && b.minPrice!==null ? (a.minPrice<b.minPrice?-1:a.minPrice>b.minPrice?1:0) : 0));
+  else if(sort==='avail') list.sort((a,b)=> b.avail>a.avail?1:b.avail<a.avail?-1:0);
+  else list.sort((a,b)=>a.order-b.order);
+  el.innerHTML = list.length ? list.map(cardHTML).join('')
+    : `<div class="empty">No properties match \u201C${esc(q)}\u201D.</div>`;
+}
+function cardHTML(p){
+  const img = p.img || placeholderImg(p.t);
+  return `<a class="pcard" href="#/properties/${p.t}">
+    <div class="pcard-img" style="${bgStyle(img)}">
+      <span class="pcard-badge ${p.avail>0n?'':'muted'}">${p.avail>0n ? p.avail+' units for sale' : 'No units for sale'}</span>
+    </div>
+    <div class="pcard-body">
+      <h3>${esc(p.name)}</h3>
+      <p class="pcard-loc">${esc([p.location, p.type].filter(Boolean).join(', ') || p.symbol)}</p>
+      <div class="pcard-foot">
+        <span class="pcard-price">${p.minPrice!==null ? rupee(p.minPrice)+'<small> / unit</small>' : '<small>Price on next offer</small>'}</span>
+        <span class="pcard-units">${p.supply} units</span>
+      </div>
+    </div>
+  </a>`;
+}
 
-/* ================= PROPERTY DETAIL ================= */
+/* ================= PROPERTY DETAIL (listing page) ================= */
+let LP = null;   // state for the open listing: { tokenAddr, offers, sel, myBalance, ... }
+
 async function renderPropertyDetail(tokenAddr){
   const app = document.getElementById('app');
   app.innerHTML = '<div class="page container"><div class="loading">Loading property\u2026</div></div>';
@@ -306,157 +373,284 @@ async function renderPropertyDetail(tokenAddr){
     const [name, symbol, supply, docHash, registrant] = await withTimeout(Promise.all([
       tk.name(), tk.symbol(), tk.totalSupply(), tk.docHash(), tk.registrant()
     ]), 15000, 'Timed out reaching Sepolia.');
+    let rentPaid = 0n; try{ rentPaid = await tk.totalYieldDeposited(); }catch{}
 
     const me = session ? session.address : null;
-    const [myBalance, myPending] = me
-      ? await Promise.all([tk.balanceOf(me), tk.pendingYield(me)])
-      : [0n, 0n];
-    const isOwner = me && me.toLowerCase()===registrant.toLowerCase();
-    const imgs = (((await getMedia(tokenAddr).catch(()=>null)) || {}).image_urls) || [];
+    const [myBalance, myPending] = me ? await Promise.all([tk.balanceOf(me), tk.pendingYield(me)]) : [0n, 0n];
+    const isOwner = !!(me && me.toLowerCase()===registrant.toLowerCase());
+    const media = (await getMedia(tokenAddr).catch(()=>null)) || {};
+    const imgs = media.image_urls || [];
 
-    const market = readContract('Marketplace');
-    const n = Number(await market.nextListingId());
-    const all = await Promise.all(Array.from({length:n}, (_,i)=>market.listings(i)));
+    const offers = (await loadOffers()).filter(o=>o.token.toLowerCase()===tokenAddr.toLowerCase());
+    const open = offers.filter(o=>o.active).sort((a,b)=> a.price<b.price?-1:a.price>b.price?1:0);
+    const buyable = open.filter(o=>!me || o.seller.toLowerCase()!==me.toLowerCase());
+    const past = offers.filter(o=>!o.active);
+    const avail = open.reduce((a,o)=>a+o.remaining, 0n);
+    const minPrice = open.length ? open[0].price : null;
 
-    let listingRows = '';
-    all.forEach((l,i)=>{
-      if(l[1].toLowerCase() !== tokenAddr.toLowerCase()) return;
-      const [seller, , remaining, price, active] = l;
-      const isSeller = me && seller.toLowerCase()===me.toLowerCase();
-      let action = '\u2014';
-      if(active){
-        if(!me) action = `<button class="btn small outline" onclick="connectWallet(false)">Connect to buy</button>`;
-        else if(isSeller) action = `<button class="btn small outline" onclick="handleCancel(${i}, '${tokenAddr}')">Cancel listing</button>`;
-        else action = `<button class="btn small gold" onclick="openBuy(${i}, '${remaining}', '${price}', '${tokenAddr}')">Buy</button>`;
-      }
-      listingRows += `<tr>
-        <td>${esc(nameFor(seller))}${isSeller?' <span class="tag-onchain">you</span>':''}</td>
-        <td>${remaining.toString()}</td>
-        <td class="rupee">${rupee(price)}</td>
-        <td>${active?'<span class="pill active">active</span>':'<span class="pill closed">closed</span>'}</td>
-        <td>${action}</td>
-      </tr>`;
-    });
+    LP = { tokenAddr, name, symbol, buyable, sel: buyable.length ? 0 : -1, myBalance, myPending, supply, isOwner, media };
 
+    const share = supply>0n ? (Number(myBalance)*100/Number(supply)) : 0;
     const safeName = String(name).replace(/['"\\]/g,'');
+    const sub = [media.location, media.property_type].filter(Boolean).map(esc).join('<span class="dot-sep" aria-hidden="true"></span>');
+
     app.innerHTML = `
-      <div class="page container">
-        <a href="#/properties" class="back-link">&larr; All Properties</a>
-        <div class="page-head">
-          <span class="kicker">${esc(symbol)}</span>
-          <h1>${esc(name)}</h1>
-          <p>${supply.toString()} total units &middot; registered by ${esc(nameFor(registrant))}${isOwner?' (you)':''} &middot; document hash <span class="badge">${docHash.slice(0,14)}\u2026</span></p>
-          <button id="dlBtn" class="btn outline small" style="margin-top:14px" onclick="downloadHistory('${tokenAddr}', '${esc(safeName)}', '${esc(symbol)}')">&darr; Download Ownership History (CSV)</button>
-        </div>
+      <div class="page container listing">
+        <nav class="crumbs" aria-label="Breadcrumb"><a href="#/properties">Properties</a><span aria-hidden="true">/</span><span>${esc(name)}</span></nav>
+        <header class="listing-head">
+          <div>
+            <h1>${esc(name)}</h1>
+            <p class="listing-sub">${sub || '<span class="muted">Location not added yet</span>'}</p>
+          </div>
+          <div class="head-tags">
+            <span class="tag">${esc(symbol)}</span>
+            ${isOwner?'<span class="tag tag-own">You listed this</span>':''}
+          </div>
+        </header>
 
-        ${imgs.length ? `<div class="gallery g${Math.min(imgs.length,3)}">${imgs.slice(0,3).map(u=>`<img src="${esc(u)}" alt="">`).join('')}</div>` : ''}
+        ${carouselHTML(imgs.length ? imgs : [placeholderImg(tokenAddr)], name, !imgs.length)}
 
-        <div class="grid-2">
-          <div class="card">
-            <div class="section-title">Your Position</div>
-            <div class="section-sub">${session?'':'Connect your wallet to see your holdings for this property.'}</div>
-            ${session?`
-              <div class="grid-2" style="gap:14px">
-                <div class="stat-card"><div class="label">Units Held</div><div class="value">${myBalance.toString()}</div></div>
-                <div class="stat-card"><div class="label">Claimable Rent</div><div class="value gold">${rupee(myPending)}</div></div>
-              </div>
-              ${myPending>0n?`<button class="btn gold block" style="margin-top:14px" onclick="handleClaim('${tokenAddr}')">Claim Rent</button>`:''}
+        <div class="listing-body">
+          <div class="listing-main">
+            <section class="facts" aria-label="Key facts">
+              <div><span>Price from</span><b>${minPrice!==null ? rupee(minPrice) : '\u2014'}</b><small>${minPrice!==null?'per unit':'no open offers'}</small></div>
+              <div><span>For sale now</span><b>${avail}</b><small>units</small></div>
+              <div><span>Total units</span><b>${supply}</b><small>1 unit = ${(100/Number(supply||1n)).toFixed(2)}%</small></div>
+              <div><span>Rent paid out</span><b>${rupee(rentPaid)}</b><small>to date</small></div>
+            </section>
+
+            <section class="sec">
+              <h2>About this property</h2>
+              <p class="desc">${media.description ? esc(media.description).replace(/\n/g,'<br>') :
+                (isOwner ? 'Add a description so investors know what they are buying into \u2014 the building, its tenants and the rent it earns.' :
+                 'The owner has not added a description yet.')}</p>
+              <dl class="spec">
+                <div><dt>Listed by</dt><dd>${esc(nameFor(registrant))}${isOwner?' (you)':''}</dd></div>
+                <div><dt>Token</dt><dd>${esc(symbol)} <a class="link" href="https://sepolia.etherscan.io/token/${tokenAddr}" target="_blank" rel="noopener">${short(tokenAddr)}</a></dd></div>
+                <div><dt>Title document hash</dt><dd><code>${esc(docHash.slice(0,18))}\u2026</code></dd></div>
+                <div><dt>Network</dt><dd>Ethereum Sepolia (test)</dd></div>
+              </dl>
+            </section>
+
+            <section class="sec" id="offers">
+              <h2>Units for sale</h2>
+              ${open.length ? `<ul class="offers">${open.map(o=>offerRowHTML(o, me)).join('')}</ul>`
+                : `<p class="muted">No one is selling units right now. ${myBalance>0n?'You can list yours from the panel on the right.':'Check back soon.'}</p>`}
+              ${past.length ? `<details class="past"><summary>${past.length} earlier offer${past.length>1?'s':''}</summary>
+                <ul class="offers past-list">${past.map(o=>`<li class="offer"><span class="who"><i>${esc(initials(nameFor(o.seller)))}</i>${esc(nameFor(o.seller))}</span><span class="what">${rupee(o.price)} per unit</span><span class="state">Closed</span></li>`).join('')}</ul></details>` : ''}
+              <div id="cancelStatus" class="status"></div>
+            </section>
+
+            <section class="sec">
+              <h2>Performance</h2>
+              <p class="muted small">Last 12 months, rebased to 100, against the NIFTY 50 and BSE SENSEX.</p>
+              ${perfChartHTML(tokenAddr)}
+              <p class="sample-note">Illustrative data for the demo. Not live market data or a forecast.</p>
+            </section>
+
+            <section class="sec">
+              <h2>Documents</h2>
+              ${docsHTML(docHash)}
+              <p class="sample-note">Sample entries. Documents are published with the live offer.</p>
+            </section>
+
+            <section class="sec">
+              <h2>Ownership history</h2>
+              <p class="muted">Every transfer of these units is on a public ledger. Download the full record for your own checks.</p>
+              <button id="dlBtn" class="btn ghost" onclick="downloadHistory('${tokenAddr}', '${esc(safeName)}', '${esc(symbol)}')">Download history (CSV)</button>
+            </section>
+
+            ${isOwner ? ownerToolsHTML(tokenAddr, media, imgs) : ''}
+          </div>
+
+          <aside class="listing-side">
+            <div class="invest-card" id="investCard"></div>
+            ${session ? `
+            <div class="hold-card">
+              <h3>Your holding</h3>
+              <div class="hold-row"><span>Units</span><b>${myBalance}</b></div>
+              <div class="hold-row"><span>Share of property</span><b>${share ? share.toFixed(2)+'%' : '0%'}</b></div>
+              <div class="hold-row"><span>Rent ready to claim</span><b class="${myPending>0n?'pos':''}">${rupee(myPending)}</b></div>
+              ${myPending>0n?`<button class="btn primary block" onclick="handleClaim('${tokenAddr}')">Claim ${rupee(myPending)}</button>`:''}
               <div id="claimStatus" class="status"></div>
-            `:`<button class="btn outline block" onclick="connectWallet(false)">Connect Wallet</button>`}
-          </div>
-
-          <div class="card">
-            <div class="section-title">List Your Units</div>
-            <div class="section-sub">${myBalance>0n?'Offer some of your units for resale. They are held in escrow until sold or cancelled.':'You need units in this property to list them.'}</div>
-            ${session && myBalance>0n ? `
-              <label>Units to list (you hold ${myBalance.toString()})</label>
-              <input id="listAmt" type="number" min="1" max="${myBalance}" value="${myBalance>50n?50:1}" />
-              <label>Price per unit (\u20B9)</label>
-              <input id="listPrice" type="number" min="1" value="5000" />
-              <button class="btn block" style="margin-top:14px" onclick="handleList('${tokenAddr}')">Approve &amp; List</button>
-              <div id="listStatus" class="status"></div>
-            ` : `<div class="note">${session?'No units to list.':'Connect your wallet first.'}</div>`}
-          </div>
+              ${myBalance>0n ? `
+              <details class="sell" ${myBalance>0n && !buyable.length ? 'open':''}>
+                <summary>Sell units</summary>
+                <label for="listAmt">Units to sell (you hold ${myBalance})</label>
+                <input id="listAmt" type="number" min="1" max="${myBalance}" value="${myBalance>10n?10:1}" />
+                <label for="listPrice">Price per unit (\u20B9)</label>
+                <input id="listPrice" type="number" min="1" value="${minPrice!==null?minPrice:5000}" />
+                <button class="btn dark block" onclick="handleList('${tokenAddr}')">List units for sale</button>
+                <p class="fine">Listed units are held in escrow until they sell or you cancel.</p>
+                <div id="listStatus" class="status"></div>
+              </details>` : ''}
+            </div>` : ''}
+          </aside>
         </div>
-
-        <div class="grid-2">
-          <div class="card">
-            <div class="section-title">Performance</div>
-            <div class="section-sub">Rebased to 100, last 12 months &mdash; this property against the NIFTY 50 and BSE SENSEX.</div>
-            ${perfChartHTML(tokenAddr)}
-            <div class="sample-note">Illustrative data for demonstration only &mdash; not live market data or a forecast.</div>
-          </div>
-          <div class="card">
-            <div class="section-title">Offer Documents</div>
-            <div class="section-sub">Statutory and listing documents for this property.</div>
-            ${docsHTML(docHash)}
-            <div class="sample-note">Sample entries &mdash; documents are published with the live offer.</div>
-          </div>
-        </div>
-
-        ${isOwner && sb ? `
-        <div class="card">
-          <div class="section-title">Property Photos</div>
-          <div class="section-sub">Add or remove photos. Changes show on the listing straight away.</div>
-          <div class="photo-grid">${imgs.map(u=>`<div class="photo-tile"><img src="${esc(u)}" alt=""><button title="Remove" onclick="handleRemovePhoto('${tokenAddr}','${esc(u)}')">&times;</button></div>`).join('') || '<div class="note">No photos yet.</div>'}</div>
-          <input id="addImages" type="file" accept="image/*" multiple onchange="previewPicked(this,'addPreview')" />
-          <div id="addPreview" class="photo-grid"></div>
-          <button class="btn" style="margin-top:6px" onclick="handleAddPhotos('${tokenAddr}')">Upload Photos</button>
-          <div id="photoStatus" class="status"></div>
-        </div>` : ''}
-
-        ${isOwner?`
-        <div class="card">
-          <div class="section-title">Distribute Rent</div>
-          <div class="section-sub">As the property owner, record a rent distribution in rupees. It splits automatically, pro-rata, across every unit holder.</div>
-          <div class="grid-2">
-            <div><label>Amount to distribute (\u20B9)</label><input id="yieldAmt" type="number" min="1" value="100000" /></div>
-            <div style="display:flex;align-items:flex-end"><button class="btn gold block" onclick="handleDeposit('${tokenAddr}')">Distribute Rent</button></div>
-          </div>
-          <div id="yieldStatus" class="status"></div>
-        </div>`:''}
-
-        <div class="card">
-          <div class="section-title">Marketplace Listings</div>
-          <div class="section-sub">Buying is instant: listed units are held in escrow, so a purchase transfers them straight to your wallet. Payment is settled in rupees, off-chain &mdash; no money moves on-chain.</div>
-          <table>
-            <thead><tr><th>Seller</th><th>Units</th><th>Price/Unit</th><th>Status</th><th>Action</th></tr></thead>
-            <tbody>${listingRows || '<tr><td colspan=5 class="empty">No listings for this property yet.</td></tr>'}</tbody>
-          </table>
-          <div id="cancelStatus" class="status"></div>
-        </div>
-
-        <div id="buyPanelWrap"></div>
       </div>`;
+    drawInvestCard();
+    initCarousel();
   }catch(e){
     app.innerHTML = '<div class="page container"><div class="status show err">Could not load this property: '+esc(e.shortMessage||e.message||e)+'</div></div>';
   }
 }
 
+function offerRowHTML(o, me){
+  const mine = me && o.seller.toLowerCase()===me.toLowerCase();
+  const idx = LP.buyable.findIndex(b=>b.id===o.id);
+  let action;
+  if(mine) action = `<button class="btn small ghost" onclick="handleCancel(${o.id}, '${LP.tokenAddr}')">Cancel</button>`;
+  else if(!me) action = `<button class="btn small ghost" onclick="connectWallet(false)">Connect to buy</button>`;
+  else action = `<button class="btn small primary" onclick="selectOffer(${idx})">Buy</button>`;
+  return `<li class="offer">
+    <span class="who"><i>${esc(initials(nameFor(o.seller)))}</i>${esc(nameFor(o.seller))}${mine?' <em>you</em>':''}</span>
+    <span class="what"><b>${o.remaining} units</b> at ${rupee(o.price)} each</span>
+    ${action}
+  </li>`;
+}
+
+/* ---- sticky invest panel ---- */
+function drawInvestCard(){
+  const el = document.getElementById('investCard'); if(!el || !LP) return;
+  const o = LP.sel >= 0 ? LP.buyable[LP.sel] : null;
+  if(!o){
+    el.innerHTML = `
+      <p class="ic-label">Buy units</p>
+      <p class="ic-empty">No units are for sale right now.</p>
+      <p class="fine">${LP.myBalance>0n ? 'You hold units in this property. You can list some for sale below.' : 'New offers appear here as soon as a holder lists units.'}</p>`;
+    return;
+  }
+  const max = o.remaining, qty = max < 10n ? max : 10n;
+  el.innerHTML = `
+    <p class="ic-label">Lowest price${LP.buyable.length>1 && LP.sel>0 ? ' \u2014 you picked another offer' : ''}</p>
+    <p class="ic-price">${rupee(o.price)} <small>per unit</small></p>
+    <p class="ic-meta">${o.remaining} units from ${esc(nameFor(o.seller))}</p>
+    <label for="buyQty">How many units?</label>
+    <div class="stepper">
+      <button type="button" aria-label="One fewer" onclick="stepQty(-1)">\u2212</button>
+      <input id="buyQty" type="number" min="1" max="${max}" value="${qty}" oninput="updateBuyTotal()" />
+      <button type="button" aria-label="One more" onclick="stepQty(1)">+</button>
+    </div>
+    <div class="ic-total"><span>You pay</span><b id="buyTotal">${rupee(qty*o.price)}</b></div>
+    <div class="ic-total"><span>Share of property</span><b id="buyShare">${(Number(qty)*100/Number(LP.supply||1n)).toFixed(2)}%</b></div>
+    ${session
+      ? `<button class="btn primary block lg" id="buyBtn" onclick="confirmBuy()">Buy ${qty} units</button>`
+      : `<button class="btn primary block lg" onclick="connectWallet(false)">Connect wallet to buy</button>`}
+    <p class="fine">You pay the seller in rupees. Your wallet only signs the record of the transfer.</p>
+    <div id="buyStatus" class="status"></div>`;
+}
+function selectOffer(i){
+  if(!LP || i<0) return;
+  LP.sel = i; drawInvestCard();
+  document.getElementById('investCard').scrollIntoView({behavior:'smooth', block:'center'});
+}
+function stepQty(d){
+  const inp = document.getElementById('buyQty'); if(!inp) return;
+  const max = Number(inp.max||1), v = Math.min(max, Math.max(1, (parseInt(inp.value,10)||1) + d));
+  inp.value = v; updateBuyTotal();
+}
+function updateBuyTotal(){
+  const o = LP && LP.buyable[LP.sel]; if(!o) return;
+  const inp = document.getElementById('buyQty');
+  let q = BigInt(Math.max(0, parseInt(inp.value,10) || 0));
+  if(q > o.remaining) q = o.remaining;
+  document.getElementById('buyTotal').textContent = rupee(q*o.price);
+  document.getElementById('buyShare').textContent = (Number(q)*100/Number(LP.supply||1n)).toFixed(2) + '%';
+  const b = document.getElementById('buyBtn'); if(b) b.textContent = 'Buy ' + q + ' unit' + (q===1n?'':'s');
+}
+
+/* ---- carousel ---- */
+function carouselHTML(imgs, name, isPlaceholder){
+  return `<div class="carousel" id="carousel" tabindex="0" aria-roledescription="carousel" aria-label="Photos of ${esc(name)}">
+    <div class="car-track" id="carTrack">
+      ${imgs.map((u,i)=>`<div class="car-slide" role="group" aria-label="Photo ${i+1} of ${imgs.length}"><img src="${esc(u)}" alt="${esc(name)}, photo ${i+1}" ${i?'loading="lazy"':''}></div>`).join('')}
+    </div>
+    ${imgs.length>1 ? `
+      <button class="car-btn prev" aria-label="Previous photo" onclick="carGo(-1)">\u2039</button>
+      <button class="car-btn next" aria-label="Next photo" onclick="carGo(1)">\u203A</button>
+      <span class="car-count" id="carCount">1 / ${imgs.length}</span>` : ''}
+    ${isPlaceholder ? '<span class="car-note">Illustration \u2014 photos not added yet</span>' : ''}
+  </div>
+  ${imgs.length>1 ? `<div class="car-thumbs" id="carThumbs">${imgs.map((u,i)=>`<button class="${i?'':'on'}" aria-label="Show photo ${i+1}" onclick="carTo(${i})"><img src="${esc(u)}" alt=""></button>`).join('')}</div>` : ''}`;
+}
+let CAR = { i:0, n:1 };
+function initCarousel(){
+  const track = document.getElementById('carTrack'); if(!track) return;
+  CAR = { i:0, n: track.children.length };
+  const box = document.getElementById('carousel');
+  box.addEventListener('keydown', e=>{ if(e.key==='ArrowLeft') carGo(-1); if(e.key==='ArrowRight') carGo(1); });
+  let x0 = null;
+  box.addEventListener('pointerdown', e=>{ x0 = e.clientX; });
+  box.addEventListener('pointerup', e=>{ if(x0===null) return; const dx = e.clientX - x0; x0 = null; if(Math.abs(dx) > 40) carGo(dx<0?1:-1); });
+}
+function carTo(i){
+  if(CAR.n < 2) return;
+  CAR.i = (i + CAR.n) % CAR.n;
+  document.getElementById('carTrack').style.transform = `translateX(-${CAR.i*100}%)`;
+  const c = document.getElementById('carCount'); if(c) c.textContent = (CAR.i+1) + ' / ' + CAR.n;
+  document.querySelectorAll('#carThumbs button').forEach((b,k)=>b.classList.toggle('on', k===CAR.i));
+}
+function carGo(d){ carTo(CAR.i + d); }
+
+/* ---- owner tools ---- */
+function ownerToolsHTML(tokenAddr, media, imgs){
+  return `
+  <section class="sec owner">
+    <h2>Manage this listing</h2>
+    <p class="muted">Only you see this section.</p>
+    ${sb ? `
+    <details class="tool" open>
+      <summary>Details shown to investors</summary>
+      <div class="two">
+        <div><label for="edLoc">Location</label><input id="edLoc" value="${esc(media.location||'')}" placeholder="e.g. Whitefield, Bengaluru" /></div>
+        <div><label for="edType">Property type</label><select id="edType">${PROPERTY_TYPES.map(t=>`<option ${t===(media.property_type||'')?'selected':''}>${t}</option>`).join('')}</select></div>
+      </div>
+      <label for="edDesc">Description</label>
+      <textarea id="edDesc" rows="5" placeholder="The building, its tenants, the lease terms and the rent it earns.">${esc(media.description||'')}</textarea>
+      <button class="btn dark" onclick="handleSaveDetails('${tokenAddr}')">Save details</button>
+      <div id="detStatus" class="status"></div>
+    </details>
+    <details class="tool">
+      <summary>Photos (${imgs.length})</summary>
+      <div class="photo-grid">${imgs.map(u=>`<div class="photo-tile"><img src="${esc(u)}" alt=""><button title="Remove photo" aria-label="Remove photo" onclick="handleRemovePhoto('${tokenAddr}','${esc(u)}')">&times;</button></div>`).join('') || '<p class="muted">No photos yet. The first photo you add becomes the cover.</p>'}</div>
+      <input id="addImages" type="file" accept="image/*" multiple onchange="previewPicked(this,'addPreview')" />
+      <div id="addPreview" class="photo-grid"></div>
+      <button class="btn dark" onclick="handleAddPhotos('${tokenAddr}')">Upload photos</button>
+      <div id="photoStatus" class="status"></div>
+    </details>` : `<p class="note">Connect Supabase in app.js to add photos and a description.</p>`}
+    <details class="tool">
+      <summary>Distribute rent</summary>
+      <p class="muted">Record a rent payment in rupees. It is split across every unit holder by units held.</p>
+      <label for="yieldAmt">Amount to distribute (\u20B9)</label>
+      <input id="yieldAmt" type="number" min="1" value="100000" />
+      <button class="btn dark" onclick="handleDeposit('${tokenAddr}')">Distribute rent</button>
+      <div id="yieldStatus" class="status"></div>
+    </details>
+  </section>`;
+}
+
 /* ---------------- documents (sample list) ---------------- */
 const SAMPLE_DOCS = [
-  ['Red Herring Prospectus',       'Issue details, pricing and risk factors'],
-  ['Scheme offer document',        'Filed with SEBI and the stock exchange'],
-  ['Trust deed',                   'Registered trust deed and trustee details'],
-  ['Valuation report',             'Independent valuation by a registered valuer'],
-  ['Title deed & khata extract',   'Property title \u2014 hash recorded on-chain'],
-  ['Audited financials & rent roll','SPV accounts, occupancy and tenant schedule'],
+  ['Red Herring Prospectus',        'Issue details, pricing and risk factors'],
+  ['Scheme offer document',         'Filed with SEBI and the stock exchange'],
+  ['Trust deed',                    'Registered trust deed and trustee details'],
+  ['Valuation report',              'Independent valuation by a registered valuer'],
+  ['Title deed and khata extract',  'Property title, with its hash recorded on-chain'],
+  ['Audited financials and rent roll','SPV accounts, occupancy and tenant schedule'],
 ];
-function docsHTML(docHash){
-  return `<div class="doc-list">${SAMPLE_DOCS.map(([t,d],i)=>`
-    <a class="doc-row" href="#" onclick="event.preventDefault();sampleDoc('${esc(t)}')">
-      <span class="doc-ic">PDF</span>
-      <span class="doc-txt"><b>${esc(t)}</b><small>${esc(d)}${i===4?` &middot; <code>${esc(docHash.slice(0,12))}\u2026</code>`:''}</small></span>
+function docsHTML(){
+  return `<ul class="docs">${SAMPLE_DOCS.map(([t,d])=>`
+    <li><a href="#" onclick="event.preventDefault();sampleDoc('${esc(t)}')">
+      <span class="doc-ic" aria-hidden="true">PDF</span>
+      <span class="doc-txt"><b>${esc(t)}</b><small>${esc(d)}</small></span>
       <span class="doc-tag">Sample</span>
-    </a>`).join('')}</div>`;
+    </a></li>`).join('')}</ul>`;
 }
 function sampleDoc(title){
   alert(title + '\n\nThis is a sample entry for the prototype. The document will be published here with the live offer.');
 }
 
-/* ---------------- performance chart (illustrative data) ----------------
-   Deterministic dummy series seeded by the token address, so each
-   property draws the same lines every time.                            */
+/* ---------------- performance chart (illustrative data) ---------------- */
 function seededRand(seed){
   let h = 2166136261;
   for(let i=0;i<seed.length;i++){ h ^= seed.charCodeAt(i); h = Math.imul(h, 16777619); }
@@ -468,45 +662,42 @@ function makeSeries(rand, drift, vol, n){
   return out;
 }
 function perfChartHTML(tokenAddr){
-  const r = seededRand(tokenAddr.toLowerCase());
+  const r = seededRand(tokenAddr.toLowerCase() + ':perf');
   const N = 13;
   const series = [
-    { name:'This property', color:'#B8643C', w:3,   data:makeSeries(r, 0.0085, 0.012, N) },
-    { name:'NIFTY 50',      color:'#1D2A3C', w:2,   data:makeSeries(r, 0.0070, 0.050, N) },
-    { name:'BSE SENSEX',    color:'#7FA08C', w:2,   data:makeSeries(r, 0.0065, 0.048, N) },
+    { name:'This property', color:'#1E4A3D', w:3, data:makeSeries(r, 0.0085, 0.012, N) },
+    { name:'NIFTY 50',      color:'#B5562F', w:2, data:makeSeries(r, 0.0070, 0.050, N) },
+    { name:'BSE SENSEX',    color:'#8C9A94', w:2, data:makeSeries(r, 0.0065, 0.048, N) },
   ];
-  const W=600, H=230, L=40, R=12, T=12, B=28;
+  const W=640, H=240, L=40, R=14, T=12, B=28;
   const vals = series.flatMap(s=>s.data);
   let lo = Math.floor((Math.min(...vals)-2)/5)*5, hi = Math.ceil((Math.max(...vals)+2)/5)*5;
   if(hi - lo < 10) hi = lo + 10;
   const x = i => L + i*(W-L-R)/(N-1);
   const y = v => T + (hi - v)*(H-T-B)/(hi - lo);
-  const months = [];
-  const now = new Date();
+  const now = new Date(), months = [];
   for(let i=N-1;i>=0;i--){ const d = new Date(now.getFullYear(), now.getMonth()-i, 1); months.push(d.toLocaleString('en-IN',{month:'short'})); }
   let g = '';
-  const steps = 4;
-  for(let k=0;k<=steps;k++){
-    const v = lo + (hi-lo)*k/steps, yy = y(v).toFixed(1);
-    g += `<line x1="${L}" y1="${yy}" x2="${W-R}" y2="${yy}" stroke="#E6DFD3" stroke-width="1"/>`;
-    g += `<text x="${L-8}" y="${(+yy+4).toFixed(1)}" text-anchor="end" font-size="11" fill="#7A8291">${Math.round(v)}</text>`;
+  for(let k=0;k<=4;k++){
+    const v = lo + (hi-lo)*k/4, yy = y(v).toFixed(1);
+    g += `<line x1="${L}" y1="${yy}" x2="${W-R}" y2="${yy}" stroke="#E3E6E1" stroke-width="1"/>`;
+    g += `<text x="${L-8}" y="${(+yy+4).toFixed(1)}" text-anchor="end" font-size="11" fill="#66726D">${Math.round(v)}</text>`;
   }
-  months.forEach((m,i)=>{ if(i%3===0 || i===N-1) g += `<text x="${x(i).toFixed(1)}" y="${H-8}" text-anchor="middle" font-size="11" fill="#7A8291">${m}</text>`; });
+  months.forEach((m,i)=>{ if(i%3===0 || i===N-1) g += `<text x="${x(i).toFixed(1)}" y="${H-8}" text-anchor="middle" font-size="11" fill="#66726D">${m}</text>`; });
   const paths = series.slice().reverse().map(s=>{
     const d = s.data.map((v,i)=>(i?'L':'M')+x(i).toFixed(1)+' '+y(v).toFixed(1)).join(' ');
-    const last = s.data[N-1];
     return `<path d="${d}" fill="none" stroke="${s.color}" stroke-width="${s.w}" stroke-linejoin="round" stroke-linecap="round"/>`+
-           `<circle cx="${x(N-1).toFixed(1)}" cy="${y(last).toFixed(1)}" r="3.5" fill="${s.color}"/>`;
+           `<circle cx="${x(N-1).toFixed(1)}" cy="${y(s.data[N-1]).toFixed(1)}" r="3.5" fill="${s.color}"/>`;
   }).join('');
   const legend = series.map(s=>{
     const chg = s.data[N-1] - 100;
-    return `<span class="lg"><i style="background:${s.color}"></i>${s.name} <b>${chg>=0?'+':''}${chg.toFixed(1)}%</b></span>`;
+    return `<span class="lg"><i style="background:${s.color}"></i>${s.name}<b>${chg>=0?'+':''}${chg.toFixed(1)}%</b></span>`;
   }).join('');
-  return `<div class="perf"><svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Illustrative 12-month performance">${g}${paths}</svg>
+  return `<div class="perf"><svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Illustrative 12-month performance against NIFTY 50 and BSE SENSEX">${g}${paths}</svg>
     <div class="perf-legend">${legend}</div></div>`;
 }
 
-/* ---------------- photos (Supabase) ---------------- */
+/* ---------------- listing details + photos (Supabase) ---------------- */
 async function uploadImages(tokenAddr, files){
   if(!sb) throw new Error('Photo storage is not configured (set SUPABASE_URL and SUPABASE_ANON_KEY in app.js).');
   const urls = [];
@@ -530,33 +721,46 @@ async function getMedia(tokenAddr){
 }
 async function getAllMedia(){
   if(!sb) return {};
-  const { data } = await sb.from('property_media').select('token_address,image_urls');
+  const { data } = await sb.from('property_media').select('token_address,image_urls,location,property_type');
   const map = {};
-  (data || []).forEach(r => { map[r.token_address] = r.image_urls || []; });
+  (data || []).forEach(r => { map[r.token_address] = r; });
   return map;
 }
-async function setImages(tokenAddr, urls){
-  const { error } = await sb.from('property_media').upsert({
-    token_address: tokenAddr.toLowerCase(), image_urls: urls,
+async function saveMedia(tokenAddr, patch){
+  const { error } = await sb.from('property_media').upsert(Object.assign({
+    token_address: tokenAddr.toLowerCase(),
     updated_by: session ? session.address.toLowerCase() : null,
     updated_at: new Date().toISOString()
-  }, { onConflict:'token_address' });
+  }, patch), { onConflict:'token_address' });
   if(error) throw error;
 }
+function setImages(tokenAddr, urls){ return saveMedia(tokenAddr, { image_urls: urls }); }
 function previewPicked(input, targetId){
   const el = document.getElementById(targetId); if(!el) return;
   el.innerHTML = [...input.files].filter(f=>f.type.startsWith('image/'))
     .map(f=>`<div class="photo-tile"><img src="${URL.createObjectURL(f)}" alt=""></div>`).join('');
 }
+async function handleSaveDetails(tokenAddr){
+  try{
+    setSt('detStatus','Saving\u2026','info');
+    await saveMedia(tokenAddr, {
+      location: document.getElementById('edLoc').value.trim(),
+      property_type: document.getElementById('edType').value,
+      description: document.getElementById('edDesc').value.trim()
+    });
+    setSt('detStatus','Details saved.','ok');
+    setTimeout(()=>renderPropertyDetail(tokenAddr), 600);
+  }catch(e){ console.error('[media]', e); setSt('detStatus','Could not save: ' + (e.message || e),'err'); }
+}
 async function handleAddPhotos(tokenAddr){
   const files = [...(document.getElementById('addImages').files || [])];
   if(!files.length){ setSt('photoStatus','Choose at least one photo first.','err'); return; }
   try{
-    setSt('photoStatus','Uploading ' + files.length + ' photo(s)\u2026','info');
+    setSt('photoStatus','Uploading ' + files.length + ' photo' + (files.length>1?'s':'') + '\u2026','info');
     const urls = await uploadImages(tokenAddr, files);
     const cur  = ((await getMedia(tokenAddr)) || {}).image_urls || [];
     await setImages(tokenAddr, cur.concat(urls));
-    setSt('photoStatus','Photos added.','ok');
+    setSt('photoStatus','Photos uploaded.','ok');
     setTimeout(()=>renderPropertyDetail(tokenAddr), 600);
   }catch(e){ console.error('[media]', e); setSt('photoStatus','Upload failed: ' + (e.message || e),'err'); }
 }
@@ -581,84 +785,58 @@ async function handleList(tokenAddr){
     const tk = new ethers.Contract(tokenAddr, ABIS.PropertyToken, provider);
     const allowance = await tk.allowance(session.address, CONFIG.marketplace);
     if(allowance < amount){
-      await sendTx('listStatus','Step 1/2: approving escrow','PropertyToken',tokenAddr,'approve',[CONFIG.marketplace, amount]);
+      await sendTx('listStatus','Step 1 of 2: approving escrow','PropertyToken',tokenAddr,'approve',[CONFIG.marketplace, amount]);
     }
-    await sendTx('listStatus','Step 2/2: creating listing','Marketplace',null,'list',[tokenAddr, amount, price]);
+    await sendTx('listStatus','Step 2 of 2: listing units','Marketplace',null,'list',[tokenAddr, amount, price]);
     setSt('listStatus','Listed '+amount+' units at '+rupee(price)+' each.','ok');
     setTimeout(()=>renderPropertyDetail(tokenAddr), 800);
   }catch(e){ console.error('[tx] list failed', e); setSt('listStatus', prettyErr(e), 'err'); }
 }
-
 async function handleCancel(id, tokenAddr){
   if(!requireLogin()) return;
   try{
-    await sendTx('cancelStatus','Cancelling listing','Marketplace',null,'cancel',[id]);
-    setSt('cancelStatus','Listing cancelled. Unsold units returned to your wallet.','ok');
+    await sendTx('cancelStatus','Cancelling your offer','Marketplace',null,'cancel',[id]);
+    setSt('cancelStatus','Offer cancelled. Unsold units are back in your wallet.','ok');
     setTimeout(()=>renderPropertyDetail(tokenAddr), 800);
   }catch(e){ console.error('[tx] cancel failed', e); setSt('cancelStatus', prettyErr(e), 'err'); }
 }
-
-function openBuy(listingId, remainingStr, priceStr, tokenAddr){
-  const remaining = BigInt(remainingStr), price = BigInt(priceStr);
-  const defaultQty = remaining < 10n ? remaining : 10n;
-  const wrap = document.getElementById('buyPanelWrap');
-  wrap.innerHTML = `
-    <div class="card" style="border:1.5px solid var(--gold)">
-      <div class="section-title">Buy Units &mdash; Listing #${listingId}</div>
-      <div class="section-sub">${remaining} units available at ${rupee(price)} each.</div>
-      <label>Quantity (max ${remaining})</label>
-      <input id="buyQty" type="number" min="1" max="${remaining}" value="${defaultQty}"
-             oninput="updateBuyTotal('${priceStr}')" />
-      <div class="field-note" id="buyTotal">Total: ${rupee(defaultQty*price)} (settled in rupees, off-chain)</div>
-      <div style="display:flex;gap:10px;margin-top:16px">
-        <button class="btn gold" onclick="confirmBuy(${listingId}, '${tokenAddr}', '${remainingStr}')">Confirm Purchase</button>
-        <button class="btn ghost" onclick="document.getElementById('buyPanelWrap').innerHTML=''">Close</button>
-      </div>
-      <div id="buyStatus" class="status"></div>
-    </div>`;
-  wrap.scrollIntoView({behavior:'smooth', block:'center'});
-}
-function updateBuyTotal(priceStr){
-  const qty = BigInt(document.getElementById('buyQty').value || '0');
-  document.getElementById('buyTotal').textContent =
-    'Total: ' + rupee(qty*BigInt(priceStr)) + ' (settled in rupees, off-chain)';
-}
-async function confirmBuy(listingId, tokenAddr, remainingStr){
-  if(!requireLogin()) return;
+async function confirmBuy(){
+  if(!requireLogin() || !LP) return;
+  const o = LP.buyable[LP.sel]; if(!o) return;
+  const btn = document.getElementById('buyBtn');
   try{
     const qty = BigInt(document.getElementById('buyQty').value || '0');
-    if(qty<=0n || qty>BigInt(remainingStr)) throw new Error('Invalid amount');
-    await sendTx('buyStatus','Buying units','Marketplace',null,'buy',[listingId, qty]);
-    setSt('buyStatus','Done \u2014 '+qty+' units are now in your wallet.','ok');
-    setTimeout(()=>renderPropertyDetail(tokenAddr), 1000);
+    if(qty<=0n || qty>o.remaining) throw new Error('Invalid amount');
+    if(btn) btn.disabled = true;
+    await sendTx('buyStatus','Buying '+qty+' units','Marketplace',null,'buy',[o.id, qty]);
+    setSt('buyStatus','Done. '+qty+' units are now in your wallet.','ok');
+    setTimeout(()=>renderPropertyDetail(LP.tokenAddr), 1000);
   }catch(e){ console.error('[tx] buy failed', e); setSt('buyStatus', prettyErr(e), 'err'); }
+  finally{ if(btn) btn.disabled = false; }
 }
-
 async function handleDeposit(tokenAddr){
   if(!requireLogin()) return;
   try{
     const amt = BigInt(document.getElementById('yieldAmt').value || '0');
     if(amt<=0n) throw new Error('Invalid amount');
     await sendTx('yieldStatus','Distributing rent','PropertyToken',tokenAddr,'depositYield',[amt]);
-    setSt('yieldStatus','Distributed '+rupee(amt)+' pro-rata across all unit holders.','ok');
+    setSt('yieldStatus','Distributed '+rupee(amt)+' across all unit holders.','ok');
     setTimeout(()=>renderPropertyDetail(tokenAddr), 800);
   }catch(e){ console.error('[tx] deposit failed', e); setSt('yieldStatus', prettyErr(e), 'err'); }
 }
-
 async function handleClaim(tokenAddr){
   if(!requireLogin()) return;
   try{
     await sendTx('claimStatus','Claiming rent','PropertyToken',tokenAddr,'claimYield',[]);
-    setSt('claimStatus','Claimed. (Rupee payout happens off-chain; this records the entitlement as settled.)','ok');
+    setSt('claimStatus','Rent claimed. The rupee payout is made off-chain.','ok');
     setTimeout(()=>renderPropertyDetail(tokenAddr), 900);
   }catch(e){ console.error('[tx] claim failed', e); setSt('claimStatus', prettyErr(e), 'err'); }
 }
-
 async function handleClaimDash(tokenAddr){
   if(!requireLogin()) return;
   try{
     await sendTx('dashClaimStatus','Claiming rent','PropertyToken',tokenAddr,'claimYield',[]);
-    setSt('dashClaimStatus','Claimed. (Rupee payout happens off-chain; this records the entitlement as settled.)','ok');
+    setSt('dashClaimStatus','Rent claimed. The rupee payout is made off-chain.','ok');
     setTimeout(renderDashboard, 900);
   }catch(e){ console.error('[tx] claim failed', e); setSt('dashClaimStatus', prettyErr(e), 'err'); }
 }
@@ -772,34 +950,45 @@ async function downloadHistory(tokenAddr, name, symbol){
 function renderListProperty(){
   if(!session){
     document.getElementById('app').innerHTML = `
-      <div class="page container" style="max-width:640px">
-        <div class="page-head"><span class="kicker">Register</span><h1>List a New Property</h1>
-          <p>Connect your wallet to register a property.</p></div>
-        <button class="btn" onclick="connectWallet(false)">Connect Wallet</button>
+      <div class="page container narrow">
+        <h1>List a property</h1>
+        <p class="lede">Connect your wallet to register a building and issue its units.</p>
+        <button class="btn primary" onclick="connectWallet(false)">Connect wallet</button>
       </div>`;
     return;
   }
   document.getElementById('app').innerHTML = `
-    <div class="page container" style="max-width:640px">
-      <div class="page-head">
-        <span class="kicker">Register</span>
-        <h1>List a New Property</h1>
-        <p>Tokenise a rent-yielding property into units. You (as the registrant) receive 100% of the units to start.</p>
-      </div>
-      <div class="card">
-        <label>Property name</label><input id="pName" value="Puravankara, Tower A" />
-        <label>Symbol</label><input id="pSymbol" value="PRVK-A" />
-        <label>Total units</label><input id="pShares" type="number" min="1" value="1000" />
-        <div class="field-note">Whole-number units. Holding 50 of 1000 = 5% of the property\u2019s income.</div>
-        <label>Document reference</label><input id="pDoc" value="Title deed and khata extract" />
-        <div class="field-note">Hashed on-chain (keccak256) so the record is tamper-evident.</div>
-        <label>Photos (optional)</label>
-        <input id="pImages" type="file" accept="image/*" multiple onchange="previewPicked(this,'pPreview')" />
-        <div class="field-note">JPG or PNG, up to 5 MB each. You can add or remove photos later.</div>
-        <div id="pPreview" class="photo-grid"></div>
-        <button id="regBtn" class="btn block" style="margin-top:20px" onclick="handleRegister()">Register Property</button>
+    <div class="page container narrow">
+      <h1>List a property</h1>
+      <p class="lede">Register a rent-yielding building and split it into units. You receive all the units to start, and can sell them to investors.</p>
+      <form class="form-card" onsubmit="event.preventDefault();handleRegister()">
+        <fieldset>
+          <legend>The building</legend>
+          <label for="pName">Property name</label><input id="pName" value="Puravankara, Tower A" required />
+          <div class="two">
+            <div><label for="pLoc">Location</label><input id="pLoc" value="Whitefield, Bengaluru" /></div>
+            <div><label for="pType">Property type</label><select id="pType">${PROPERTY_TYPES.map(t=>`<option>${t}</option>`).join('')}</select></div>
+          </div>
+          <label for="pDesc">Description</label>
+          <textarea id="pDesc" rows="4" placeholder="The building, its tenants, the lease terms and the rent it earns."></textarea>
+          <label for="pImages">Photos</label>
+          <input id="pImages" type="file" accept="image/*" multiple onchange="previewPicked(this,'pPreview')" />
+          <p class="fine">JPG or PNG, up to 5 MB each. The first photo becomes the cover. You can change photos later.</p>
+          <div id="pPreview" class="photo-grid"></div>
+        </fieldset>
+        <fieldset>
+          <legend>Units</legend>
+          <div class="two">
+            <div><label for="pSymbol">Token symbol</label><input id="pSymbol" value="PRVK-A" required /></div>
+            <div><label for="pShares">Number of units</label><input id="pShares" type="number" min="1" value="1000" required /></div>
+          </div>
+          <p class="fine">Whole units only. Holding 50 of 1,000 units means a 5% share of the rent.</p>
+          <label for="pDoc">Title document reference</label><input id="pDoc" value="Title deed and khata extract" />
+          <p class="fine">Stored as a fingerprint (hash) on the ledger, so the record can be checked later.</p>
+        </fieldset>
+        <button id="regBtn" class="btn primary block lg" type="submit">Register property</button>
         <div id="regStatus" class="status"></div>
-      </div>
+      </form>
     </div>`;
 }
 async function handleRegister(){
@@ -810,7 +999,7 @@ async function handleRegister(){
     const name = document.getElementById('pName').value.trim();
     const symbol = document.getElementById('pSymbol').value.trim();
     const units = BigInt(document.getElementById('pShares').value || '0');
-    if(!name || !symbol || units<=0n) throw new Error('Fill in a name, symbol and a unit count above 0.');
+    if(!name || !symbol || units<=0n) throw new Error('Fill in a name, a symbol and a number of units above 0.');
     const docHash = ethers.keccak256(ethers.toUtf8Bytes(document.getElementById('pDoc').value));
 
     const rc = await sendTx('regStatus','Registering property','PropertyTokenFactory',null,'registerLand',
@@ -822,19 +1011,25 @@ async function handleRegister(){
       try{ const p = iface.parseLog(log); if(p && p.name==='LandRegistered') tokenAddr = p.args.tokenAddress; }catch{}
     }
 
-    const files = [...((document.getElementById('pImages') || {}).files || [])];
-    if(tokenAddr && files.length && sb){
+    if(tokenAddr && sb){
       try{
-        setSt('regStatus','Registered on-chain. Uploading photos\u2026','info');
-        await setImages(tokenAddr, await uploadImages(tokenAddr, files));
+        const files = [...((document.getElementById('pImages') || {}).files || [])];
+        setSt('regStatus','Registered on-chain. Saving details' + (files.length?' and photos':'') + '…','info');
+        const urls = files.length ? await uploadImages(tokenAddr, files) : [];
+        await saveMedia(tokenAddr, {
+          image_urls: urls,
+          location: document.getElementById('pLoc').value.trim(),
+          property_type: document.getElementById('pType').value,
+          description: document.getElementById('pDesc').value.trim()
+        });
       }catch(e){
-        console.error('[media] upload failed', e);
-        setSt('regStatus','Registered on-chain, but the photos failed to upload. You can add them from the property page.','err');
+        console.error('[media] save failed', e);
+        setSt('regStatus','Registered on-chain, but the details or photos did not save. You can add them from the property page.','err');
         setTimeout(()=>{ location.hash = '#/properties/' + tokenAddr; }, 2500);
         return;
       }
     }
-    setSt('regStatus','Registered! Opening your property\u2026','ok');
+    setSt('regStatus','Registered. Opening your property…','ok');
     setTimeout(()=>{ location.hash = tokenAddr ? '#/properties/'+tokenAddr : '#/properties'; }, 900);
   }catch(e){
     console.error('[tx] register failed', e);
@@ -848,82 +1043,80 @@ async function handleRegister(){
 async function renderDashboard(){
   const app = document.getElementById('app');
   if(!session){
-    app.innerHTML = `<div class="page container"><div class="page-head"><span class="kicker">Dashboard</span>
-      <h1>Your Dashboard</h1><p>Connect your wallet to see your holdings.</p></div>
-      <button class="btn" onclick="connectWallet(false)">Connect Wallet</button></div>`;
+    app.innerHTML = `<div class="page container narrow"><h1>Your dashboard</h1>
+      <p class="lede">Connect your wallet to see the units you hold and the rent you can claim.</p>
+      <button class="btn primary" onclick="connectWallet(false)">Connect wallet</button></div>`;
     return;
   }
-  app.innerHTML = '<div class="page container"><div class="loading">Loading your dashboard\u2026</div></div>';
+  app.innerHTML = '<div class="page container"><div class="loading">Loading your dashboard…</div></div>';
   try{
     const me = session.address;
     const all = await withTimeout(readContract('PropertyTokenFactory').getAllTokens(), 15000, 'Timed out reaching Sepolia.');
+    const [media, offers] = await Promise.all([ getAllMedia().catch(()=>({})), loadOffers().catch(()=>[]) ]);
 
-    const holdings = await Promise.all(all.map(async t=>{
+    const holdings = (await Promise.all(all.map(async t=>{
       const tk = new ethers.Contract(t, ABIS.PropertyToken, provider);
       const bal = await tk.balanceOf(me);
       if(bal===0n) return null;
       const [name, supply, pending] = await Promise.all([tk.name(), tk.totalSupply(), tk.pendingYield(me)]);
       return { t, name, supply, pending, bal };
-    }));
-    let totalProps=0, totalPending=0n, holdingRows='';
-    for(const h of holdings){
-      if(!h) continue;
-      totalProps++; totalPending += h.pending;
-      const pct = h.supply>0n ? (Number(h.bal)*100/Number(h.supply)).toFixed(1) : '0';
-      holdingRows += `<tr>
-        <td><a href="#/properties/${h.t}" style="color:var(--blue);font-weight:600">${esc(h.name)}</a></td>
-        <td>${h.bal}</td><td>${pct}%</td><td class="rupee">${rupee(h.pending)}</td>
-        <td>${h.pending>0n
-          ? `<button class="btn small gold" onclick="handleClaimDash('${h.t}')">Claim Rent</button>`
-          : '<span style="color:var(--muted);font-size:12.5px">Nothing to claim</span>'}</td></tr>`;
-    }
+    }))).filter(Boolean);
 
-    const market = readContract('Marketplace');
-    const n = Number(await market.nextListingId());
-    const listings = await Promise.all(Array.from({length:n}, (_,i)=>market.listings(i)));
-    let myActiveListings = 0, listingRows = '';
-    for(const l of listings){
-      if(l[0].toLowerCase()!==me.toLowerCase() || !l[4]) continue;
-      myActiveListings++;
-      let name='Property'; try{ name = await new ethers.Contract(l[1], ABIS.PropertyToken, provider).name(); }catch{}
-      listingRows += `<tr>
-        <td><a href="#/properties/${l[1]}" style="color:var(--blue);font-weight:600">${esc(name)}</a></td>
-        <td>${l[2]}</td><td class="rupee">${rupee(l[3])}</td>
-        <td><a href="#/properties/${l[1]}" style="color:var(--blue);font-size:12.5px;font-weight:600">Manage &rarr;</a></td></tr>`;
-    }
+    const totalPending = holdings.reduce((a,h)=>a+h.pending, 0n);
+    const mine = offers.filter(o=>o.active && o.seller.toLowerCase()===me.toLowerCase());
+    const names = {};
+    await Promise.all([...new Set(mine.map(o=>o.token))].map(async t=>{
+      try{ names[t] = await new ethers.Contract(t, ABIS.PropertyToken, provider).name(); }catch{ names[t]='Property'; }
+    }));
+
+    const thumb = t => { const m = media[t.toLowerCase()] || {}; return (m.image_urls||[])[0] || placeholderImg(t); };
 
     app.innerHTML = `
       <div class="page container">
-        <div class="page-head">
-          <span class="kicker">Dashboard</span>
-          <h1>Welcome back, ${esc(session.name)}</h1>
-          <p>${session.role} &middot; ${short(session.address)}</p>
+        <div class="dash-head">
+          <div>
+            <h1>Your dashboard</h1>
+            <p class="lede">${esc(session.name)} <span class="muted">· ${short(session.address)}</span></p>
+          </div>
         </div>
-        <div class="grid-3" style="margin-bottom:24px">
-          <div class="stat-card"><div class="label">Properties Held</div><div class="value">${totalProps}</div></div>
-          <div class="stat-card"><div class="label">Claimable Rent (Total)</div><div class="value gold">${rupee(totalPending)}</div></div>
-          <div class="stat-card"><div class="label">Active Listings</div><div class="value">${myActiveListings}</div></div>
+        <div class="summary">
+          <div><span>Properties</span><b>${holdings.length}</b></div>
+          <div><span>Rent ready to claim</span><b class="${totalPending>0n?'pos':''}">${rupee(totalPending)}</b></div>
+          <div><span>Your open offers</span><b>${mine.length}</b></div>
         </div>
-        <div class="card">
-          <div class="section-title">Your Holdings</div>
-          <div class="section-sub">Properties you hold units in. Claim rent for each property here.</div>
-          <table>
-            <thead><tr><th>Property</th><th>Units</th><th>Share of Property</th><th>Claimable Rent</th><th>Action</th></tr></thead>
-            <tbody>${holdingRows || '<tr><td colspan=5 class="empty">No holdings yet. <a href="#/properties" style="color:var(--blue);font-weight:600">Browse properties</a> or <a href="#/list-property" style="color:var(--blue);font-weight:600">register one</a>.</td></tr>'}</tbody>
-          </table>
+
+        <section class="sec">
+          <h2>Holdings</h2>
+          ${holdings.length ? `<ul class="hold-list">${holdings.map(h=>{
+            const pct = h.supply>0n ? (Number(h.bal)*100/Number(h.supply)).toFixed(2) : '0';
+            const m = media[h.t.toLowerCase()] || {};
+            return `<li>
+              <a class="hl-img" href="#/properties/${h.t}" style="${bgStyle(thumb(h.t))}" aria-label="${esc(h.name)}"></a>
+              <div class="hl-main"><a class="hl-name" href="#/properties/${h.t}">${esc(h.name)}</a><span class="muted">${esc(m.location || '')}</span></div>
+              <div class="hl-num"><span>Units</span><b>${h.bal}</b></div>
+              <div class="hl-num"><span>Share</span><b>${pct}%</b></div>
+              <div class="hl-num"><span>Rent to claim</span><b class="${h.pending>0n?'pos':''}">${rupee(h.pending)}</b></div>
+              <div class="hl-act">${h.pending>0n
+                ? `<button class="btn small primary" onclick="handleClaimDash('${h.t}')">Claim rent</button>`
+                : '<span class="muted small">Nothing to claim</span>'}</div>
+            </li>`; }).join('')}</ul>`
+          : `<div class="empty">You don’t hold any units yet. <a class="link" href="#/properties">Browse properties</a> to buy your first.</div>`}
           <div id="dashClaimStatus" class="status"></div>
-        </div>
-        <div class="card">
-          <div class="section-title">Your Active Listings</div>
-          <div class="section-sub">Units you currently have for sale (held in escrow).</div>
-          <table>
-            <thead><tr><th>Property</th><th>Units Left</th><th>Price/Unit</th><th></th></tr></thead>
-            <tbody>${listingRows || '<tr><td colspan=4 class="empty">No active listings.</td></tr>'}</tbody>
-          </table>
-        </div>
+        </section>
+
+        <section class="sec">
+          <h2>Your open offers</h2>
+          ${mine.length ? `<ul class="offers">${mine.map(o=>`
+            <li class="offer">
+              <span class="who"><a class="link" href="#/properties/${o.token}">${esc(names[o.token]||'Property')}</a></span>
+              <span class="what"><b>${o.remaining} units</b> at ${rupee(o.price)} each</span>
+              <a class="btn small ghost" href="#/properties/${o.token}">Manage</a>
+            </li>`).join('')}</ul>`
+          : '<p class="muted">You have no units listed for sale.</p>'}
+        </section>
       </div>`;
   }catch(e){
-    app.innerHTML = '<div class="page container"><div class="status show err">Could not load dashboard: '+esc(e.shortMessage||e.message||e)+'</div></div>';
+    app.innerHTML = '<div class="page container"><div class="status show err">Could not load your dashboard: '+esc(e.shortMessage||e.message||e)+'</div></div>';
   }
 }
 
