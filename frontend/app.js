@@ -33,8 +33,8 @@ const NAMES = {
 const SEPOLIA_CHAIN_ID = "0xaa36a7"; // 11155111
 
 /* ---------------- Supabase (property photos) ---------------- */
-const SUPABASE_URL      = 'https://YOUR-PROJECT.supabase.co';
-const SUPABASE_ANON_KEY = 'YOUR-ANON-KEY';
+const SUPABASE_URL      = 'https://aeqgvrjppxzjhoxuploh.supabase.co/rest/v1/';
+const SUPABASE_ANON_KEY = 'sb_publishable_BdE-SjAqpq81wSuViL1C9g_q9fYAUqI';
 const BUCKET = 'property-images';
 const sb = (window.supabase && SUPABASE_URL.startsWith('https') && !SUPABASE_URL.includes('YOUR-PROJECT'))
   ? window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY) : null;
