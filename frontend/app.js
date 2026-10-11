@@ -1,9 +1,9 @@
 /* ============================================================
-   Parcel — app.js
+   Parcel.io — app.js
    Real self-custody build: users connect their own MetaMask
    wallet on Sepolia and sign their own transactions.
-   Ownership is recorded on-chain; payment/rent are rupees off-chain.
-   Buying is real-time: shares are escrowed at listing, so a buyer
+   Units are recorded on-chain; payment and rent are rupees, off-chain.
+   Buying is real-time: units are escrowed at listing, so a buyer
    completes a purchase in one click from their own wallet.
 
    Transaction reliability:
@@ -14,6 +14,10 @@
      (the signature popup), with gas already filled in.
    - Confirmation is watched through Alchemy, not through MetaMask.
    - Timeouts everywhere, and [tx] logs in the browser console.
+
+   Off-chain (Supabase): property photos. Fill in SUPABASE_URL and
+   SUPABASE_ANON_KEY below. The anon key is safe in the browser;
+   never put the service_role key here.
    ============================================================ */
 
 let CONFIG = null, ABIS = null, provider = null;   // provider = read-only (Alchemy / Sepolia RPC)
@@ -27,6 +31,13 @@ const NAMES = {
 };
 
 const SEPOLIA_CHAIN_ID = "0xaa36a7"; // 11155111
+
+/* ---------------- Supabase (property photos) ---------------- */
+const SUPABASE_URL      = 'https://aeqgvrjppxzjhoxuploh.supabase.co/rest/v1/';
+const SUPABASE_ANON_KEY = 'sb_publishable_BdE-SjAqpq81wSuViL1C9g_q9fYAUqI';
+const BUCKET = 'property-images';
+const sb = (window.supabase && SUPABASE_URL.startsWith('https') && !SUPABASE_URL.includes('YOUR-PROJECT'))
+  ? window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY) : null;
 
 /* ---------------- boot ---------------- */
 async function boot(){
@@ -78,6 +89,7 @@ function rupee(n){ return '\u20B9'+Number(n).toLocaleString('en-IN'); }
 function nameFor(addr){ const k=NAMES[addr.toLowerCase()]; return k?k.name:short(addr); }
 function roleFor(addr){ const k=NAMES[addr.toLowerCase()]; return k?k.role:'Investor'; }
 function esc(s){ return String(s).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function sleep(ms){ return new Promise(r=>setTimeout(r, ms)); }
 function withTimeout(p, ms, msg){
   let t; return Promise.race([p, new Promise((_,rej)=>{ t=setTimeout(()=>rej(new Error(msg)), ms); })])
     .finally(()=>clearTimeout(t));
@@ -93,7 +105,6 @@ async function sendTx(statusId, label, contractName, addrOverride, method, args)
   const readC = new ethers.Contract(to, ABIS[contractName], provider);
   if(typeof readC[method] !== 'function') throw new Error(method+' is not a function');
 
-  // make sure MetaMask is still on Sepolia
   const chainId = await withTimeout(window.ethereum.request({ method:'eth_chainId' }), 10000,
     'MetaMask is not responding. Click the MetaMask icon to unlock it, then try again.');
   if(chainId !== SEPOLIA_CHAIN_ID) throw new Error('MetaMask is not on Sepolia. Switch network and try again.');
@@ -184,7 +195,7 @@ function renderNav(){
   const isActive = p => hash===p || (p==='/properties' && hash.startsWith('/properties'));
   document.getElementById('nav').innerHTML = `
     <div class="nav-inner">
-      <a href="#/" class="brand">Parcel<span class="dot">.</span></a>
+      <a href="#/" class="brand">Parcel<span class="dot">.io</span></a>
       <div class="nav-links">
         <a href="#/" class="${isActive('/')?'active':''}">Home</a>
         <a href="#/properties" class="${isActive('/properties')?'active':''}">Properties</a>
@@ -205,11 +216,11 @@ function renderHome(){
   document.getElementById('app').innerHTML = `
     <section class="hero">
       <div class="container">
-        <span class="kicker">Real Estate Tokenisation</span>
-        <h1>Own a share of real property, recorded on-chain.</h1>
-        <p>Parcel divides verified properties into digital shares. The blockchain records exactly who owns
-           what and distributes rental income pro-rata &mdash; no cryptocurrency required. Payment and rent
-           are handled in rupees, off-chain.</p>
+        <span class="kicker">Real estate for every Indian</span>
+        <h1>Buy a unit. Earn the rent. Trade anytime.</h1>
+        <p>Parcel.io divides rent-yielding properties into small units. The blockchain records exactly who
+           holds which units and splits rental income pro-rata &mdash; no cryptocurrency required. Payment
+           and rent are handled in rupees, off-chain.</p>
         <div class="hero-actions">
           <button class="btn gold" onclick="location.hash='#/properties'">Browse Properties</button>
           ${session?'':'<button class="btn ghost" onclick="connectWallet(false)">Connect Wallet</button>'}
@@ -218,16 +229,16 @@ function renderHome(){
     </section>
     <section class="feature-strip">
       <div class="container grid-3">
-        <div class="feature"><div class="num">01</div><h3>Verified Ownership</h3>
-          <p>Every share is recorded on an immutable, independently verifiable ledger.</p></div>
+        <div class="feature"><div class="num">01</div><h3>Verified Records</h3>
+          <p>Every unit is recorded on an immutable, independently verifiable ledger.</p></div>
         <div class="feature"><div class="num">02</div><h3>No Cryptocurrency</h3>
-          <p>The chain records ownership only. Payment and rent are rupees, off-chain, always.</p></div>
+          <p>The chain records unit holdings only. Payment and rent are rupees, off-chain, always.</p></div>
         <div class="feature"><div class="num">03</div><h3>Pro-Rata Rent</h3>
-          <p>Rental income is distributed automatically in proportion to shares held.</p></div>
+          <p>Rental income is split automatically in proportion to the units each investor holds.</p></div>
       </div>
     </section>
     <div class="container" style="padding:50px 0">
-      <div class="page-head"><h1>Featured Properties</h1><p>A sample of parcels currently tokenised on the platform.</p></div>
+      <div class="page-head"><h1>Featured Properties</h1><p>Rent-yielding properties currently on the platform.</p></div>
       <div id="homeProps" class="grid-3"><div class="loading">Loading properties\u2026</div></div>
     </div>`;
   loadPropertyCards('homeProps', 3);
@@ -240,7 +251,7 @@ function renderProperties(){
       <div class="page-head">
         <span class="kicker">Marketplace</span>
         <h1>All Properties</h1>
-        <p>Every parcel tokenised on the platform. Click one to view shares, listings, and rent.</p>
+        <p>Every property tokenised on the platform. Click one to view units, listings, documents and rent.</p>
       </div>
       <div id="allProps" class="grid-3"><div class="loading">Loading properties\u2026</div></div>
     </div>`;
@@ -259,17 +270,22 @@ async function loadPropertyCards(targetId, limit){
       el.innerHTML = '<div class="empty">No properties registered yet. Be the first to <a href="#/list-property" style="color:var(--blue);font-weight:600">list one</a>.</div>';
       return;
     }
+    const media = await getAllMedia().catch(()=>({}));
     const cards = await Promise.all(all.map(async t=>{
       const tk = new ethers.Contract(t, ABIS.PropertyToken, provider);
       let name='Property', supply=0n, symbol='';
       try{ [name, supply, symbol] = await Promise.all([tk.name(), tk.totalSupply(), tk.symbol()]); }catch{}
+      const img = (media[t.toLowerCase()] || [])[0];
+      const thumb = img
+        ? `<div class="thumb has-photo" style="background-image:linear-gradient(180deg,rgba(0,0,0,0) 45%,rgba(0,0,0,.55)),url('${esc(img)}')">${esc(symbol||'PARCEL')}</div>`
+        : `<div class="thumb">${esc(symbol||'PARCEL')}</div>`;
       return `<div class="prop-card" onclick="location.hash='#/properties/${t}'">
-        <div class="thumb">${esc(symbol||'PARCEL')}</div>
+        ${thumb}
         <div class="body">
           <h3>${esc(name)}</h3>
           <div class="meta">${short(t)}</div>
           <div class="prop-stats">
-            <div><span>Total Shares</span><b>${supply.toString()}</b></div>
+            <div><span>Total Units</span><b>${supply.toString()}</b></div>
             <div><span>Token</span><b>${esc(symbol)}</b></div>
           </div>
         </div>
@@ -296,6 +312,7 @@ async function renderPropertyDetail(tokenAddr){
       ? await Promise.all([tk.balanceOf(me), tk.pendingYield(me)])
       : [0n, 0n];
     const isOwner = me && me.toLowerCase()===registrant.toLowerCase();
+    const imgs = (((await getMedia(tokenAddr).catch(()=>null)) || {}).image_urls) || [];
 
     const market = readContract('Marketplace');
     const n = Number(await market.nextListingId());
@@ -328,9 +345,11 @@ async function renderPropertyDetail(tokenAddr){
         <div class="page-head">
           <span class="kicker">${esc(symbol)}</span>
           <h1>${esc(name)}</h1>
-          <p>${supply.toString()} total shares &middot; registered by ${esc(nameFor(registrant))}${isOwner?' (you)':''} &middot; document hash <span class="badge">${docHash.slice(0,14)}\u2026</span></p>
+          <p>${supply.toString()} total units &middot; registered by ${esc(nameFor(registrant))}${isOwner?' (you)':''} &middot; document hash <span class="badge">${docHash.slice(0,14)}\u2026</span></p>
           <button id="dlBtn" class="btn outline small" style="margin-top:14px" onclick="downloadHistory('${tokenAddr}', '${esc(safeName)}', '${esc(symbol)}')">&darr; Download Ownership History (CSV)</button>
         </div>
+
+        ${imgs.length ? `<div class="gallery g${Math.min(imgs.length,3)}">${imgs.slice(0,3).map(u=>`<img src="${esc(u)}" alt="">`).join('')}</div>` : ''}
 
         <div class="grid-2">
           <div class="card">
@@ -338,7 +357,7 @@ async function renderPropertyDetail(tokenAddr){
             <div class="section-sub">${session?'':'Connect your wallet to see your holdings for this property.'}</div>
             ${session?`
               <div class="grid-2" style="gap:14px">
-                <div class="stat-card"><div class="label">Shares Held</div><div class="value">${myBalance.toString()}</div></div>
+                <div class="stat-card"><div class="label">Units Held</div><div class="value">${myBalance.toString()}</div></div>
                 <div class="stat-card"><div class="label">Claimable Rent</div><div class="value gold">${rupee(myPending)}</div></div>
               </div>
               ${myPending>0n?`<button class="btn gold block" style="margin-top:14px" onclick="handleClaim('${tokenAddr}')">Claim Rent</button>`:''}
@@ -347,23 +366,49 @@ async function renderPropertyDetail(tokenAddr){
           </div>
 
           <div class="card">
-            <div class="section-title">List Your Shares</div>
-            <div class="section-sub">${myBalance>0n?'Offer some of your shares for resale. They are held in escrow until sold or cancelled.':'You need shares in this property to list them.'}</div>
+            <div class="section-title">List Your Units</div>
+            <div class="section-sub">${myBalance>0n?'Offer some of your units for resale. They are held in escrow until sold or cancelled.':'You need units in this property to list them.'}</div>
             ${session && myBalance>0n ? `
-              <label>Shares to list (you hold ${myBalance.toString()})</label>
+              <label>Units to list (you hold ${myBalance.toString()})</label>
               <input id="listAmt" type="number" min="1" max="${myBalance}" value="${myBalance>50n?50:1}" />
-              <label>Price per share (\u20B9)</label>
+              <label>Price per unit (\u20B9)</label>
               <input id="listPrice" type="number" min="1" value="5000" />
               <button class="btn block" style="margin-top:14px" onclick="handleList('${tokenAddr}')">Approve &amp; List</button>
               <div id="listStatus" class="status"></div>
-            ` : `<div class="note">${session?'No shares to list.':'Connect your wallet first.'}</div>`}
+            ` : `<div class="note">${session?'No units to list.':'Connect your wallet first.'}</div>`}
           </div>
         </div>
+
+        <div class="grid-2">
+          <div class="card">
+            <div class="section-title">Performance</div>
+            <div class="section-sub">Rebased to 100, last 12 months &mdash; this property against the NIFTY 50 and BSE SENSEX.</div>
+            ${perfChartHTML(tokenAddr)}
+            <div class="sample-note">Illustrative data for demonstration only &mdash; not live market data or a forecast.</div>
+          </div>
+          <div class="card">
+            <div class="section-title">Offer Documents</div>
+            <div class="section-sub">Statutory and listing documents for this property.</div>
+            ${docsHTML(docHash)}
+            <div class="sample-note">Sample entries &mdash; documents are published with the live offer.</div>
+          </div>
+        </div>
+
+        ${isOwner && sb ? `
+        <div class="card">
+          <div class="section-title">Property Photos</div>
+          <div class="section-sub">Add or remove photos. Changes show on the listing straight away.</div>
+          <div class="photo-grid">${imgs.map(u=>`<div class="photo-tile"><img src="${esc(u)}" alt=""><button title="Remove" onclick="handleRemovePhoto('${tokenAddr}','${esc(u)}')">&times;</button></div>`).join('') || '<div class="note">No photos yet.</div>'}</div>
+          <input id="addImages" type="file" accept="image/*" multiple onchange="previewPicked(this,'addPreview')" />
+          <div id="addPreview" class="photo-grid"></div>
+          <button class="btn" style="margin-top:6px" onclick="handleAddPhotos('${tokenAddr}')">Upload Photos</button>
+          <div id="photoStatus" class="status"></div>
+        </div>` : ''}
 
         ${isOwner?`
         <div class="card">
           <div class="section-title">Distribute Rent</div>
-          <div class="section-sub">As the property owner, record a rent distribution in rupees. It splits automatically, pro-rata, across every shareholder.</div>
+          <div class="section-sub">As the property owner, record a rent distribution in rupees. It splits automatically, pro-rata, across every unit holder.</div>
           <div class="grid-2">
             <div><label>Amount to distribute (\u20B9)</label><input id="yieldAmt" type="number" min="1" value="100000" /></div>
             <div style="display:flex;align-items:flex-end"><button class="btn gold block" onclick="handleDeposit('${tokenAddr}')">Distribute Rent</button></div>
@@ -373,9 +418,9 @@ async function renderPropertyDetail(tokenAddr){
 
         <div class="card">
           <div class="section-title">Marketplace Listings</div>
-          <div class="section-sub">Buying is instant: listed shares are held in escrow, so a purchase transfers them straight to your wallet. Payment is settled in rupees, off-chain &mdash; no money moves on-chain.</div>
+          <div class="section-sub">Buying is instant: listed units are held in escrow, so a purchase transfers them straight to your wallet. Payment is settled in rupees, off-chain &mdash; no money moves on-chain.</div>
           <table>
-            <thead><tr><th>Seller</th><th>Shares</th><th>Price/Share</th><th>Status</th><th>Action</th></tr></thead>
+            <thead><tr><th>Seller</th><th>Units</th><th>Price/Unit</th><th>Status</th><th>Action</th></tr></thead>
             <tbody>${listingRows || '<tr><td colspan=5 class="empty">No listings for this property yet.</td></tr>'}</tbody>
           </table>
           <div id="cancelStatus" class="status"></div>
@@ -386,6 +431,144 @@ async function renderPropertyDetail(tokenAddr){
   }catch(e){
     app.innerHTML = '<div class="page container"><div class="status show err">Could not load this property: '+esc(e.shortMessage||e.message||e)+'</div></div>';
   }
+}
+
+/* ---------------- documents (sample list) ---------------- */
+const SAMPLE_DOCS = [
+  ['Red Herring Prospectus',       'Issue details, pricing and risk factors'],
+  ['Scheme offer document',        'Filed with SEBI and the stock exchange'],
+  ['Trust deed',                   'Registered trust deed and trustee details'],
+  ['Valuation report',             'Independent valuation by a registered valuer'],
+  ['Title deed & khata extract',   'Property title \u2014 hash recorded on-chain'],
+  ['Audited financials & rent roll','SPV accounts, occupancy and tenant schedule'],
+];
+function docsHTML(docHash){
+  return `<div class="doc-list">${SAMPLE_DOCS.map(([t,d],i)=>`
+    <a class="doc-row" href="#" onclick="event.preventDefault();sampleDoc('${esc(t)}')">
+      <span class="doc-ic">PDF</span>
+      <span class="doc-txt"><b>${esc(t)}</b><small>${esc(d)}${i===4?` &middot; <code>${esc(docHash.slice(0,12))}\u2026</code>`:''}</small></span>
+      <span class="doc-tag">Sample</span>
+    </a>`).join('')}</div>`;
+}
+function sampleDoc(title){
+  alert(title + '\n\nThis is a sample entry for the prototype. The document will be published here with the live offer.');
+}
+
+/* ---------------- performance chart (illustrative data) ----------------
+   Deterministic dummy series seeded by the token address, so each
+   property draws the same lines every time.                            */
+function seededRand(seed){
+  let h = 2166136261;
+  for(let i=0;i<seed.length;i++){ h ^= seed.charCodeAt(i); h = Math.imul(h, 16777619); }
+  return ()=>{ h ^= h << 13; h ^= h >>> 17; h ^= h << 5; return ((h >>> 0) % 10000) / 10000; };
+}
+function makeSeries(rand, drift, vol, n){
+  const out = [100];
+  for(let i=1;i<n;i++) out.push(out[i-1] * (1 + drift + (rand()-0.5) * vol));
+  return out;
+}
+function perfChartHTML(tokenAddr){
+  const r = seededRand(tokenAddr.toLowerCase());
+  const N = 13;
+  const series = [
+    { name:'This property', color:'#B8643C', w:3,   data:makeSeries(r, 0.0085, 0.012, N) },
+    { name:'NIFTY 50',      color:'#1D2A3C', w:2,   data:makeSeries(r, 0.0070, 0.050, N) },
+    { name:'BSE SENSEX',    color:'#7FA08C', w:2,   data:makeSeries(r, 0.0065, 0.048, N) },
+  ];
+  const W=600, H=230, L=40, R=12, T=12, B=28;
+  const vals = series.flatMap(s=>s.data);
+  let lo = Math.floor((Math.min(...vals)-2)/5)*5, hi = Math.ceil((Math.max(...vals)+2)/5)*5;
+  if(hi - lo < 10) hi = lo + 10;
+  const x = i => L + i*(W-L-R)/(N-1);
+  const y = v => T + (hi - v)*(H-T-B)/(hi - lo);
+  const months = [];
+  const now = new Date();
+  for(let i=N-1;i>=0;i--){ const d = new Date(now.getFullYear(), now.getMonth()-i, 1); months.push(d.toLocaleString('en-IN',{month:'short'})); }
+  let g = '';
+  const steps = 4;
+  for(let k=0;k<=steps;k++){
+    const v = lo + (hi-lo)*k/steps, yy = y(v).toFixed(1);
+    g += `<line x1="${L}" y1="${yy}" x2="${W-R}" y2="${yy}" stroke="#E6DFD3" stroke-width="1"/>`;
+    g += `<text x="${L-8}" y="${(+yy+4).toFixed(1)}" text-anchor="end" font-size="11" fill="#7A8291">${Math.round(v)}</text>`;
+  }
+  months.forEach((m,i)=>{ if(i%3===0 || i===N-1) g += `<text x="${x(i).toFixed(1)}" y="${H-8}" text-anchor="middle" font-size="11" fill="#7A8291">${m}</text>`; });
+  const paths = series.slice().reverse().map(s=>{
+    const d = s.data.map((v,i)=>(i?'L':'M')+x(i).toFixed(1)+' '+y(v).toFixed(1)).join(' ');
+    const last = s.data[N-1];
+    return `<path d="${d}" fill="none" stroke="${s.color}" stroke-width="${s.w}" stroke-linejoin="round" stroke-linecap="round"/>`+
+           `<circle cx="${x(N-1).toFixed(1)}" cy="${y(last).toFixed(1)}" r="3.5" fill="${s.color}"/>`;
+  }).join('');
+  const legend = series.map(s=>{
+    const chg = s.data[N-1] - 100;
+    return `<span class="lg"><i style="background:${s.color}"></i>${s.name} <b>${chg>=0?'+':''}${chg.toFixed(1)}%</b></span>`;
+  }).join('');
+  return `<div class="perf"><svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Illustrative 12-month performance">${g}${paths}</svg>
+    <div class="perf-legend">${legend}</div></div>`;
+}
+
+/* ---------------- photos (Supabase) ---------------- */
+async function uploadImages(tokenAddr, files){
+  if(!sb) throw new Error('Photo storage is not configured (set SUPABASE_URL and SUPABASE_ANON_KEY in app.js).');
+  const urls = [];
+  for(const f of files){
+    if(!f.type.startsWith('image/')) continue;
+    if(f.size > 5*1024*1024) throw new Error(f.name + ' is larger than 5 MB.');
+    const ext  = (f.name.split('.').pop() || 'jpg').toLowerCase();
+    const path = `${tokenAddr.toLowerCase()}/${Date.now()}-${Math.random().toString(36).slice(2,8)}.${ext}`;
+    const { error } = await sb.storage.from(BUCKET).upload(path, f, { contentType:f.type, upsert:false });
+    if(error) throw error;
+    urls.push(sb.storage.from(BUCKET).getPublicUrl(path).data.publicUrl);
+  }
+  return urls;
+}
+async function getMedia(tokenAddr){
+  if(!sb) return null;
+  const { data, error } = await sb.from('property_media').select('*')
+    .eq('token_address', tokenAddr.toLowerCase()).maybeSingle();
+  if(error) throw error;
+  return data;
+}
+async function getAllMedia(){
+  if(!sb) return {};
+  const { data } = await sb.from('property_media').select('token_address,image_urls');
+  const map = {};
+  (data || []).forEach(r => { map[r.token_address] = r.image_urls || []; });
+  return map;
+}
+async function setImages(tokenAddr, urls){
+  const { error } = await sb.from('property_media').upsert({
+    token_address: tokenAddr.toLowerCase(), image_urls: urls,
+    updated_by: session ? session.address.toLowerCase() : null,
+    updated_at: new Date().toISOString()
+  }, { onConflict:'token_address' });
+  if(error) throw error;
+}
+function previewPicked(input, targetId){
+  const el = document.getElementById(targetId); if(!el) return;
+  el.innerHTML = [...input.files].filter(f=>f.type.startsWith('image/'))
+    .map(f=>`<div class="photo-tile"><img src="${URL.createObjectURL(f)}" alt=""></div>`).join('');
+}
+async function handleAddPhotos(tokenAddr){
+  const files = [...(document.getElementById('addImages').files || [])];
+  if(!files.length){ setSt('photoStatus','Choose at least one photo first.','err'); return; }
+  try{
+    setSt('photoStatus','Uploading ' + files.length + ' photo(s)\u2026','info');
+    const urls = await uploadImages(tokenAddr, files);
+    const cur  = ((await getMedia(tokenAddr)) || {}).image_urls || [];
+    await setImages(tokenAddr, cur.concat(urls));
+    setSt('photoStatus','Photos added.','ok');
+    setTimeout(()=>renderPropertyDetail(tokenAddr), 600);
+  }catch(e){ console.error('[media]', e); setSt('photoStatus','Upload failed: ' + (e.message || e),'err'); }
+}
+async function handleRemovePhoto(tokenAddr, url){
+  if(!confirm('Remove this photo?')) return;
+  try{
+    const cur = ((await getMedia(tokenAddr)) || {}).image_urls || [];
+    await setImages(tokenAddr, cur.filter(u => u !== url));
+    const marker = '/' + BUCKET + '/', i = url.indexOf(marker);
+    if(i >= 0) await sb.storage.from(BUCKET).remove([decodeURIComponent(url.slice(i + marker.length))]);
+    renderPropertyDetail(tokenAddr);
+  }catch(e){ alert('Could not remove photo: ' + (e.message || e)); }
 }
 
 /* ---------------- write actions ---------------- */
@@ -401,7 +584,7 @@ async function handleList(tokenAddr){
       await sendTx('listStatus','Step 1/2: approving escrow','PropertyToken',tokenAddr,'approve',[CONFIG.marketplace, amount]);
     }
     await sendTx('listStatus','Step 2/2: creating listing','Marketplace',null,'list',[tokenAddr, amount, price]);
-    setSt('listStatus','Listed '+amount+' shares at '+rupee(price)+' each.','ok');
+    setSt('listStatus','Listed '+amount+' units at '+rupee(price)+' each.','ok');
     setTimeout(()=>renderPropertyDetail(tokenAddr), 800);
   }catch(e){ console.error('[tx] list failed', e); setSt('listStatus', prettyErr(e), 'err'); }
 }
@@ -410,7 +593,7 @@ async function handleCancel(id, tokenAddr){
   if(!requireLogin()) return;
   try{
     await sendTx('cancelStatus','Cancelling listing','Marketplace',null,'cancel',[id]);
-    setSt('cancelStatus','Listing cancelled. Unsold shares returned to your wallet.','ok');
+    setSt('cancelStatus','Listing cancelled. Unsold units returned to your wallet.','ok');
     setTimeout(()=>renderPropertyDetail(tokenAddr), 800);
   }catch(e){ console.error('[tx] cancel failed', e); setSt('cancelStatus', prettyErr(e), 'err'); }
 }
@@ -421,8 +604,8 @@ function openBuy(listingId, remainingStr, priceStr, tokenAddr){
   const wrap = document.getElementById('buyPanelWrap');
   wrap.innerHTML = `
     <div class="card" style="border:1.5px solid var(--gold)">
-      <div class="section-title">Buy Shares &mdash; Listing #${listingId}</div>
-      <div class="section-sub">${remaining} shares available at ${rupee(price)} each.</div>
+      <div class="section-title">Buy Units &mdash; Listing #${listingId}</div>
+      <div class="section-sub">${remaining} units available at ${rupee(price)} each.</div>
       <label>Quantity (max ${remaining})</label>
       <input id="buyQty" type="number" min="1" max="${remaining}" value="${defaultQty}"
              oninput="updateBuyTotal('${priceStr}')" />
@@ -445,8 +628,8 @@ async function confirmBuy(listingId, tokenAddr, remainingStr){
   try{
     const qty = BigInt(document.getElementById('buyQty').value || '0');
     if(qty<=0n || qty>BigInt(remainingStr)) throw new Error('Invalid amount');
-    await sendTx('buyStatus','Buying shares','Marketplace',null,'buy',[listingId, qty]);
-    setSt('buyStatus','Done \u2014 '+qty+' shares are now in your wallet.','ok');
+    await sendTx('buyStatus','Buying units','Marketplace',null,'buy',[listingId, qty]);
+    setSt('buyStatus','Done \u2014 '+qty+' units are now in your wallet.','ok');
     setTimeout(()=>renderPropertyDetail(tokenAddr), 1000);
   }catch(e){ console.error('[tx] buy failed', e); setSt('buyStatus', prettyErr(e), 'err'); }
 }
@@ -457,7 +640,7 @@ async function handleDeposit(tokenAddr){
     const amt = BigInt(document.getElementById('yieldAmt').value || '0');
     if(amt<=0n) throw new Error('Invalid amount');
     await sendTx('yieldStatus','Distributing rent','PropertyToken',tokenAddr,'depositYield',[amt]);
-    setSt('yieldStatus','Distributed '+rupee(amt)+' pro-rata across all shareholders.','ok');
+    setSt('yieldStatus','Distributed '+rupee(amt)+' pro-rata across all unit holders.','ok');
     setTimeout(()=>renderPropertyDetail(tokenAddr), 800);
   }catch(e){ console.error('[tx] deposit failed', e); setSt('yieldStatus', prettyErr(e), 'err'); }
 }
@@ -471,12 +654,19 @@ async function handleClaim(tokenAddr){
   }catch(e){ console.error('[tx] claim failed', e); setSt('claimStatus', prettyErr(e), 'err'); }
 }
 
+async function handleClaimDash(tokenAddr){
+  if(!requireLogin()) return;
+  try{
+    await sendTx('dashClaimStatus','Claiming rent','PropertyToken',tokenAddr,'claimYield',[]);
+    setSt('dashClaimStatus','Claimed. (Rupee payout happens off-chain; this records the entitlement as settled.)','ok');
+    setTimeout(renderDashboard, 900);
+  }catch(e){ console.error('[tx] claim failed', e); setSt('dashClaimStatus', prettyErr(e), 'err'); }
+}
+
 /* ================= OWNERSHIP HISTORY CSV =================
    One Alchemy request (alchemy_getAssetTransfers) returns every transfer
-   for this token, so there is no block-by-block scanning. If the RPC does
-   not support it, falls back to a short eth_getLogs scan.               */
-function sleep(ms){ return new Promise(r=>setTimeout(r, ms)); }
-
+   for this token — no block-by-block scanning. If the RPC does not
+   support it, falls back to a short eth_getLogs scan of recent blocks. */
 async function rpc(method, params){
   const res = await fetch(CONFIG.rpc, {
     method:'POST', headers:{'Content-Type':'application/json'},
@@ -486,8 +676,6 @@ async function rpc(method, params){
   if(json.error) throw new Error(json.error.message || 'RPC error');
   return json.result;
 }
-
-/* Every ERC-20 transfer of this token, oldest first. Mints included. */
 async function fetchTransfers(tokenAddr, prog){
   const out = [];
   let pageKey, page = 0;
@@ -511,8 +699,6 @@ async function fetchTransfers(tokenAddr, prog){
     time: t.metadata && t.metadata.blockTimestamp ? t.metadata.blockTimestamp : ''
   }));
 }
-
-/* Fallback for a non-Alchemy RPC: scan recent blocks only. */
 async function fetchTransfersByLogs(tokenAddr, prog){
   const pv = new ethers.JsonRpcProvider(CONFIG.rpc, 11155111,
     { staticNetwork:true, batchMaxCount:1, batchStallTime:0 });
@@ -537,7 +723,6 @@ async function fetchTransfersByLogs(tokenAddr, prog){
   }
   return rows.sort((a,b)=>a.block-b.block);
 }
-
 async function downloadHistory(tokenAddr, name, symbol){
   const btn = document.getElementById('dlBtn');
   const label = btn ? btn.innerHTML : '';
@@ -553,11 +738,11 @@ async function downloadHistory(tokenAddr, name, symbol){
     }
     prog('Building CSV\u2026');
 
-    const ZERO = ethers.ZeroAddress;
+    const ZERO = ethers.ZeroAddress.toLowerCase();
     const csvCell = s => { s = String(s); return /[",\n]/.test(s) ? '"'+s.replace(/"/g,'""')+'"' : s; };
     const tag = a => a && a.toLowerCase()===CONFIG.marketplace.toLowerCase() ? a+' (Marketplace escrow)' : a;
     const body = rows.map((t,i)=>{
-      const isMint = t.from && t.from.toLowerCase() === ZERO.toLowerCase();
+      const isMint = t.from && t.from.toLowerCase() === ZERO;
       return [ i+1, isMint ? 'Mint (initial issue)' : 'Transfer',
         isMint ? '(newly minted)' : tag(t.from), tag(t.to),
         t.value.toString(), t.block, t.time, t.hash ];
@@ -567,7 +752,7 @@ async function downloadHistory(tokenAddr, name, symbol){
       ['Network', CONFIG.network || 'sepolia'], ['Exported', new Date().toLocaleString()],
       ['Total Records', body.length], [],
     ];
-    const header = ['#','Type','From','To','Shares','Block','Timestamp (UTC)','Transaction Hash'];
+    const header = ['#','Type','From','To','Units','Block','Timestamp (UTC)','Transaction Hash'];
     const csv = [...meta, header, ...body].map(r => r.map(csvCell).join(',')).join('\n');
 
     const url = URL.createObjectURL(new Blob([csv], { type:'text/csv;charset=utf-8;' }));
@@ -599,15 +784,19 @@ function renderListProperty(){
       <div class="page-head">
         <span class="kicker">Register</span>
         <h1>List a New Property</h1>
-        <p>Tokenise a parcel into shares. You (as the registrant) receive 100% of the shares to start.</p>
+        <p>Tokenise a rent-yielding property into units. You (as the registrant) receive 100% of the units to start.</p>
       </div>
       <div class="card">
         <label>Property name</label><input id="pName" value="Puravankara, Tower A" />
         <label>Symbol</label><input id="pSymbol" value="PRVK-A" />
-        <label>Total shares</label><input id="pShares" type="number" min="1" value="1000" />
-        <div class="field-note">Whole-number shares. Owning 50 of 1000 = 5% of the property.</div>
+        <label>Total units</label><input id="pShares" type="number" min="1" value="1000" />
+        <div class="field-note">Whole-number units. Holding 50 of 1000 = 5% of the property\u2019s income.</div>
         <label>Document reference</label><input id="pDoc" value="Title deed and khata extract" />
         <div class="field-note">Hashed on-chain (keccak256) so the record is tamper-evident.</div>
+        <label>Photos (optional)</label>
+        <input id="pImages" type="file" accept="image/*" multiple onchange="previewPicked(this,'pPreview')" />
+        <div class="field-note">JPG or PNG, up to 5 MB each. You can add or remove photos later.</div>
+        <div id="pPreview" class="photo-grid"></div>
         <button id="regBtn" class="btn block" style="margin-top:20px" onclick="handleRegister()">Register Property</button>
         <div id="regStatus" class="status"></div>
       </div>
@@ -620,17 +809,30 @@ async function handleRegister(){
     if(btn) btn.disabled = true;
     const name = document.getElementById('pName').value.trim();
     const symbol = document.getElementById('pSymbol').value.trim();
-    const shares = BigInt(document.getElementById('pShares').value || '0');
-    if(!name || !symbol || shares<=0n) throw new Error('Fill in a name, symbol and a share count above 0.');
+    const units = BigInt(document.getElementById('pShares').value || '0');
+    if(!name || !symbol || units<=0n) throw new Error('Fill in a name, symbol and a unit count above 0.');
     const docHash = ethers.keccak256(ethers.toUtf8Bytes(document.getElementById('pDoc').value));
 
     const rc = await sendTx('regStatus','Registering property','PropertyTokenFactory',null,'registerLand',
-      [name, symbol, shares, docHash, 'demo']);
+      [name, symbol, units, docHash, 'demo']);
 
     const iface = new ethers.Interface(ABIS.PropertyTokenFactory);
     let tokenAddr = null;
     for(const log of rc.logs){
       try{ const p = iface.parseLog(log); if(p && p.name==='LandRegistered') tokenAddr = p.args.tokenAddress; }catch{}
+    }
+
+    const files = [...((document.getElementById('pImages') || {}).files || [])];
+    if(tokenAddr && files.length && sb){
+      try{
+        setSt('regStatus','Registered on-chain. Uploading photos\u2026','info');
+        await setImages(tokenAddr, await uploadImages(tokenAddr, files));
+      }catch(e){
+        console.error('[media] upload failed', e);
+        setSt('regStatus','Registered on-chain, but the photos failed to upload. You can add them from the property page.','err');
+        setTimeout(()=>{ location.hash = '#/properties/' + tokenAddr; }, 2500);
+        return;
+      }
     }
     setSt('regStatus','Registered! Opening your property\u2026','ok');
     setTimeout(()=>{ location.hash = tokenAddr ? '#/properties/'+tokenAddr : '#/properties'; }, 900);
@@ -704,18 +906,18 @@ async function renderDashboard(){
         </div>
         <div class="card">
           <div class="section-title">Your Holdings</div>
-          <div class="section-sub">Properties you own shares in.</div>
+          <div class="section-sub">Properties you hold units in. Claim rent for each property here.</div>
           <table>
-            <thead><tr><th>Property</th><th>Shares</th><th>Ownership</th><th>Claimable Rent</th><th>Action</th></tr></thead>
+            <thead><tr><th>Property</th><th>Units</th><th>Share of Property</th><th>Claimable Rent</th><th>Action</th></tr></thead>
             <tbody>${holdingRows || '<tr><td colspan=5 class="empty">No holdings yet. <a href="#/properties" style="color:var(--blue);font-weight:600">Browse properties</a> or <a href="#/list-property" style="color:var(--blue);font-weight:600">register one</a>.</td></tr>'}</tbody>
           </table>
           <div id="dashClaimStatus" class="status"></div>
         </div>
         <div class="card">
           <div class="section-title">Your Active Listings</div>
-          <div class="section-sub">Shares you currently have for sale (held in escrow).</div>
+          <div class="section-sub">Units you currently have for sale (held in escrow).</div>
           <table>
-            <thead><tr><th>Property</th><th>Shares Left</th><th>Price/Share</th><th></th></tr></thead>
+            <thead><tr><th>Property</th><th>Units Left</th><th>Price/Unit</th><th></th></tr></thead>
             <tbody>${listingRows || '<tr><td colspan=4 class="empty">No active listings.</td></tr>'}</tbody>
           </table>
         </div>
@@ -736,6 +938,7 @@ function prettyErr(e){
   if(m.includes('Nothing to claim')) return 'Nothing to claim yet.';
   if(m.includes('Listing not active')) return 'This listing is no longer active. Refresh the page.';
   if(m.includes('Invalid amount') || m.includes('must be > 0')) return 'Enter a valid quantity.';
+  if(m.includes('could not coalesce')) return 'The network provider rejected a batch of requests. Wait a few seconds and try again.';
   if(/insufficient funds/i.test(m)) return 'Not enough Sepolia test ETH for gas. Top up from a Sepolia faucet (free) and try again.';
   if((e && (e.code === 4001 || e.code === 'ACTION_REJECTED')) || /user (rejected|denied)/i.test(m)) return 'You rejected the request in MetaMask.';
   if(e && e.code === -32002) return 'A MetaMask request is already open. Click the MetaMask icon to finish it.';
